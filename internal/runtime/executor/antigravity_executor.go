@@ -22,6 +22,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"golang.org/x/sync/singleflight"
 )
 
 // Note: This executor uses the canonical translator (TranslateToGeminiCLI) for request/response translation.
@@ -44,7 +45,8 @@ const (
 
 // AntigravityExecutor proxies requests to the antigravity upstream.
 type AntigravityExecutor struct {
-	cfg *config.Config
+	cfg     *config.Config
+	sfGroup singleflight.Group // Prevents concurrent token refresh stampede
 }
 
 // NewAntigravityExecutor constructs a new executor instance.
@@ -445,20 +447,49 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 	return nil
 }
 
+// tokenRefreshResult holds the result of a token refresh operation for singleflight.
+type tokenRefreshResult struct {
+	token string
+	auth  *cliproxyauth.Auth
+}
+
 func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *cliproxyauth.Auth) (string, *cliproxyauth.Auth, error) {
 	if auth == nil {
 		return "", nil, statusErr{code: http.StatusUnauthorized, msg: "missing auth"}
 	}
+
+	// Fast path: token still valid
 	accessToken := metaStringValue(auth.Metadata, "access_token")
 	expiry := tokenExpiry(auth.Metadata)
 	if accessToken != "" && expiry.After(time.Now().Add(refreshSkew)) {
 		return accessToken, nil, nil
 	}
-	updated, errRefresh := e.refreshToken(ctx, auth.Clone())
-	if errRefresh != nil {
-		return "", nil, errRefresh
+
+	// Use singleflight to prevent concurrent refresh stampede for same auth
+	result, err, _ := e.sfGroup.Do(auth.ID, func() (interface{}, error) {
+		// Double-check inside singleflight - another goroutine may have just refreshed
+		accessToken := metaStringValue(auth.Metadata, "access_token")
+		expiry := tokenExpiry(auth.Metadata)
+		if accessToken != "" && expiry.After(time.Now().Add(refreshSkew)) {
+			return tokenRefreshResult{token: accessToken, auth: nil}, nil
+		}
+
+		updated, errRefresh := e.refreshToken(ctx, auth.Clone())
+		if errRefresh != nil {
+			return nil, errRefresh
+		}
+		return tokenRefreshResult{
+			token: metaStringValue(updated.Metadata, "access_token"),
+			auth:  updated,
+		}, nil
+	})
+
+	if err != nil {
+		return "", nil, err
 	}
-	return metaStringValue(updated.Metadata, "access_token"), updated, nil
+
+	res := result.(tokenRefreshResult)
+	return res.token, res.auth, nil
 }
 
 func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
@@ -513,6 +544,21 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	}
 	if errUnmarshal := json.Unmarshal(bodyBytes, &tokenResp); errUnmarshal != nil {
 		return auth, errUnmarshal
+	}
+
+	// Validate token response
+	if tokenResp.AccessToken == "" {
+		return auth, newCategorizedError(http.StatusUnauthorized,
+			"invalid token response: missing access_token", nil)
+	}
+	if tokenResp.ExpiresIn < 0 {
+		return auth, newCategorizedError(http.StatusUnauthorized,
+			"invalid token response: negative expires_in", nil)
+	}
+	if tokenResp.ExpiresIn == 0 {
+		// Default to 1 hour for Google OAuth if not specified
+		tokenResp.ExpiresIn = 3600
+		log.Debugf("antigravity: token response missing expires_in, using default 3600s")
 	}
 
 	if auth.Metadata == nil {
