@@ -481,9 +481,7 @@ func timestampRotationOrder(name string) (int64, bool) {
 		return 0, false
 	}
 	clean := strings.TrimPrefix(name, prefix)
-	if strings.HasSuffix(clean, ".gz") {
-		clean = strings.TrimSuffix(clean, ".gz")
-	}
+	clean = strings.TrimSuffix(clean, ".gz")
 	if ext != "" {
 		if !strings.HasSuffix(clean, ext) {
 			return 0, false
