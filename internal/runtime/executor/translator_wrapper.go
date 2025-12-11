@@ -11,7 +11,6 @@ import (
 	"github.com/nghyane/llm-mux/internal/translator/ir"
 	"github.com/nghyane/llm-mux/internal/translator/to_ir"
 	sdktranslator "github.com/nghyane/llm-mux/sdk/translator"
-	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

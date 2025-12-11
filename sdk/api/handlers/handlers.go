@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -13,7 +14,6 @@ import (
 	coreexecutor "github.com/nghyane/llm-mux/sdk/cliproxy/executor"
 	"github.com/nghyane/llm-mux/sdk/config"
 	sdktranslator "github.com/nghyane/llm-mux/sdk/translator"
-	"golang.org/x/net/context"
 )
 
 type ErrorResponse struct {
