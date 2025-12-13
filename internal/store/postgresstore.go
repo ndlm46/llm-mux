@@ -226,7 +226,7 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 			if jsonEqual(existing, raw) {
 				return path, nil
 			}
-		} else if errRead != nil && !errors.Is(errRead, fs.ErrNotExist) {
+		} else if !errors.Is(errRead, fs.ErrNotExist) {
 			return "", fmt.Errorf("postgres store: read existing metadata: %w", errRead)
 		}
 		tmp := path + ".tmp"
