@@ -33,10 +33,6 @@ func startCallbackForwarder(port int, provider, targetBase string) (any, error) 
 	return callbackForwardersMgr.StartForwarder(port, provider, targetBase)
 }
 
-// stopCallbackForwarder stops a callback forwarder on the given port.
-func stopCallbackForwarder(port int) {
-	callbackForwardersMgr.StopForwarder(port)
-}
 
 func extractLastRefreshTimestamp(meta map[string]any) (time.Time, bool) {
 	if len(meta) == 0 {
@@ -91,13 +87,6 @@ func parseLastRefreshValue(v any) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-func sanitizeAntigravityFileName(email string) string {
-	if strings.TrimSpace(email) == "" {
-		return "antigravity.json"
-	}
-	replacer := strings.NewReplacer("@", "_", ".", "_")
-	return fmt.Sprintf("antigravity-%s.json", replacer.Replace(email))
-}
 
 func (h *Handler) managementCallbackURL(path string) (string, error) {
 	if h == nil || h.cfg == nil || h.cfg.Port <= 0 {

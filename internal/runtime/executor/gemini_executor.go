@@ -269,7 +269,7 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		translatedReq = util.ApplyGeminiThinkingConfig(translatedReq, budgetOverride, includeOverride)
 	}
 	translatedReq = util.StripThinkingConfigIfUnsupported(req.Model, translatedReq)
-	respCtx := context.WithValue(ctx, "alt", opts.Alt)
+	respCtx := context.WithValue(ctx, altContextKey{}, opts.Alt)
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "safetySettings")
@@ -460,44 +460,3 @@ func applyGeminiHeaders(req *http.Request, auth *cliproxyauth.Auth) {
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
 }
 
-func fixGeminiImageAspectRatio(modelName string, rawJSON []byte) []byte {
-	if modelName == "gemini-2.5-flash-image-preview" {
-		aspectRatioResult := gjson.GetBytes(rawJSON, "generationConfig.imageConfig.aspectRatio")
-		if aspectRatioResult.Exists() {
-			contents := gjson.GetBytes(rawJSON, "contents")
-			contentArray := contents.Array()
-			if len(contentArray) > 0 {
-				hasInlineData := false
-			loopContent:
-				for _, content := range contentArray {
-					parts := content.Get("parts").Array()
-					for _, part := range parts {
-						if part.Get("inlineData").Exists() {
-							hasInlineData = true
-							break loopContent
-						}
-					}
-				}
-
-				if !hasInlineData {
-					emptyImageBase64ed, _ := util.CreateWhiteImageBase64(aspectRatioResult.String())
-					emptyImagePart := `{"inlineData":{"mime_type":"image/png","data":""}}`
-					emptyImagePart, _ = sjson.Set(emptyImagePart, "inlineData.data", emptyImageBase64ed)
-					newPartsJson := `[]`
-					newPartsJson, _ = sjson.SetRaw(newPartsJson, "-1", `{"text": "Based on the following requirements, create an image within the uploaded picture. The new content *MUST* completely cover the entire area of the original picture, maintaining its exact proportions, and *NO* blank areas should appear."}`)
-					newPartsJson, _ = sjson.SetRaw(newPartsJson, "-1", emptyImagePart)
-
-					parts := contentArray[0].Get("parts").Array()
-					for _, part := range parts {
-						newPartsJson, _ = sjson.SetRaw(newPartsJson, "-1", part.Raw)
-					}
-
-					rawJSON, _ = sjson.SetRawBytes(rawJSON, "contents.0.parts", []byte(newPartsJson))
-					rawJSON, _ = sjson.SetRawBytes(rawJSON, "generationConfig.responseModalities", []byte(`["IMAGE", "TEXT"]`))
-				}
-			}
-			rawJSON, _ = sjson.DeleteBytes(rawJSON, "generationConfig.imageConfig")
-		}
-	}
-	return rawJSON
-}

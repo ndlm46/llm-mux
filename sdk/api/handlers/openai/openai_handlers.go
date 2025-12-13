@@ -8,7 +8,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	. "github.com/nghyane/llm-mux/internal/constant"
+	"github.com/nghyane/llm-mux/internal/constant"
 	"github.com/nghyane/llm-mux/internal/interfaces"
 	"github.com/nghyane/llm-mux/internal/registry"
 	"github.com/nghyane/llm-mux/sdk/api/handlers"
@@ -45,7 +45,7 @@ func NewOpenAIAPIHandler(apiHandlers *handlers.BaseAPIHandler) *OpenAIAPIHandler
 
 // HandlerType returns the identifier for this handler implementation.
 func (h *OpenAIAPIHandler) HandlerType() string {
-	return OpenAI
+	return constant.OpenAI
 }
 
 // Models returns the OpenAI-compatible model metadata supported by this handler.

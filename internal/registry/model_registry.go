@@ -179,7 +179,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 	now := time.Now()
 
 	oldModels, hadExisting := r.clientModels[clientID]
-	oldProvider, _ := r.clientProviders[clientID]
+	oldProvider := r.clientProviders[clientID]
 	providerChanged := oldProvider != provider
 	if !hadExisting {
 		// Pure addition path.

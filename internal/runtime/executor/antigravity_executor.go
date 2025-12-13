@@ -167,7 +167,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 
 // ExecuteStream handles streaming requests via the antigravity upstream.
 func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
-	ctx = context.WithValue(ctx, "alt", "")
+	ctx = context.WithValue(ctx, altContextKey{}, "")
 
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {

@@ -118,7 +118,7 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context
 		translatedReq = util.ApplyGeminiThinkingConfig(translatedReq, budgetOverride, includeOverride)
 	}
 	translatedReq = util.StripThinkingConfigIfUnsupported(req.Model, translatedReq)
-	respCtx := context.WithValue(ctx, "alt", opts.Alt)
+	respCtx := context.WithValue(ctx, altContextKey{}, opts.Alt)
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "safetySettings")
@@ -183,7 +183,7 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(ctx context.Context, auth *
 		translatedReq = util.ApplyGeminiThinkingConfig(translatedReq, budgetOverride, includeOverride)
 	}
 	translatedReq = util.StripThinkingConfigIfUnsupported(req.Model, translatedReq)
-	respCtx := context.WithValue(ctx, "alt", opts.Alt)
+	respCtx := context.WithValue(ctx, altContextKey{}, opts.Alt)
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "safetySettings")

@@ -7,7 +7,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	. "github.com/nghyane/llm-mux/internal/constant"
+	"github.com/nghyane/llm-mux/internal/constant"
 	"github.com/nghyane/llm-mux/internal/interfaces"
 	"github.com/nghyane/llm-mux/internal/registry"
 	"github.com/nghyane/llm-mux/sdk/api/handlers"
@@ -36,7 +36,7 @@ func NewOpenAIResponsesAPIHandler(apiHandlers *handlers.BaseAPIHandler) *OpenAIR
 
 // HandlerType returns the identifier for this handler implementation.
 func (h *OpenAIResponsesAPIHandler) HandlerType() string {
-	return OpenaiResponse
+	return constant.OpenaiResponse
 }
 
 // Models returns the OpenAIResponses-compatible model metadata supported by this handler.
@@ -107,10 +107,6 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 		return
 	}
 	_, _ = c.Writer.Write(resp)
-	return
-
-	// no legacy fallback
-
 }
 
 // handleStreamingResponse handles streaming responses for Gemini models.
@@ -143,7 +139,6 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	dataChan, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 	h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan)
-	return
 }
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {

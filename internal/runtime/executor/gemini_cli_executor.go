@@ -13,11 +13,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/nghyane/llm-mux/internal/config"
-	"github.com/nghyane/llm-mux/internal/oauth"
 	"github.com/nghyane/llm-mux/internal/misc"
+	"github.com/nghyane/llm-mux/internal/oauth"
 	"github.com/nghyane/llm-mux/internal/runtime/geminicli"
 	"github.com/nghyane/llm-mux/internal/translator/from_ir"
-	"github.com/nghyane/llm-mux/internal/util"
 	cliproxyauth "github.com/nghyane/llm-mux/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/nghyane/llm-mux/sdk/cliproxy/executor"
 	sdktranslator "github.com/nghyane/llm-mux/sdk/translator"
@@ -358,7 +357,7 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 	models := []string{req.Model}
 
 	httpClient := newHTTPClient(ctx, e.cfg, auth, 0)
-	respCtx := context.WithValue(ctx, "alt", opts.Alt)
+	respCtx := context.WithValue(ctx, altContextKey{}, opts.Alt)
 
 	var lastStatus int
 	var lastBody []byte
@@ -656,48 +655,6 @@ func deleteJSONField(body []byte, key string) []byte {
 		return body
 	}
 	return updated
-}
-
-func fixGeminiCLIImageAspectRatio(modelName string, rawJSON []byte) []byte {
-	if modelName == "gemini-2.5-flash-image-preview" {
-		aspectRatioResult := gjson.GetBytes(rawJSON, "request.generationConfig.imageConfig.aspectRatio")
-		if aspectRatioResult.Exists() {
-			contents := gjson.GetBytes(rawJSON, "request.contents")
-			contentArray := contents.Array()
-			if len(contentArray) > 0 {
-				hasInlineData := false
-			loopContent:
-				for _, content := range contentArray {
-					parts := content.Get("parts").Array()
-					for _, part := range parts {
-						if part.Get("inlineData").Exists() {
-							hasInlineData = true
-							break loopContent
-						}
-					}
-				}
-
-				if !hasInlineData {
-					emptyImageBase64ed, _ := util.CreateWhiteImageBase64(aspectRatioResult.String())
-					emptyImagePart := `{"inlineData":{"mime_type":"image/png","data":""}}`
-					emptyImagePart, _ = sjson.Set(emptyImagePart, "inlineData.data", emptyImageBase64ed)
-					newPartsJson := `[]`
-					newPartsJson, _ = sjson.SetRaw(newPartsJson, "-1", `{"text": "Based on the following requirements, create an image within the uploaded picture. The new content *MUST* completely cover the entire area of the original picture, maintaining its exact proportions, and *NO* blank areas should appear."}`)
-					newPartsJson, _ = sjson.SetRaw(newPartsJson, "-1", emptyImagePart)
-
-					parts := contentArray[0].Get("parts").Array()
-					for _, part := range parts {
-						newPartsJson, _ = sjson.SetRaw(newPartsJson, "-1", part.Raw)
-					}
-
-					rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.contents.0.parts", []byte(newPartsJson))
-					rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.generationConfig.responseModalities", []byte(`["IMAGE", "TEXT"]`))
-				}
-			}
-			rawJSON, _ = sjson.DeleteBytes(rawJSON, "request.generationConfig.imageConfig")
-		}
-	}
-	return rawJSON
 }
 
 func newGeminiStatusErr(statusCode int, body []byte) statusErr {

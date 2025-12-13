@@ -104,28 +104,6 @@ func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after f
 	c.JSON(400, gin.H{"error": "missing index or value"})
 }
 
-func sanitizeStringSlice(in []string) []string {
-	out := make([]string, 0, len(in))
-	for i := range in {
-		if trimmed := strings.TrimSpace(in[i]); trimmed != "" {
-			out = append(out, trimmed)
-		}
-	}
-	return out
-}
-
-func geminiKeyStringsFromConfig(cfg *config.Config) []string {
-	if cfg == nil || len(cfg.GeminiKey) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(cfg.GeminiKey))
-	for i := range cfg.GeminiKey {
-		if key := strings.TrimSpace(cfg.GeminiKey[i].APIKey); key != "" {
-			out = append(out, key)
-		}
-	}
-	return out
-}
 
 // api-keys
 func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }

@@ -329,10 +329,15 @@ func buildClaudeContentParts(msg ir.Message, includeToolCalls bool) []any {
 	return parts
 }
 
+// sseBuffer wraps a byte slice for pooling (pointer type for sync.Pool).
+type sseBuffer struct {
+	data []byte
+}
+
 // sseBufferPool provides reusable buffers for SSE formatting.
 var sseBufferPool = sync.Pool{
 	New: func() any {
-		return make([]byte, 0, 512)
+		return &sseBuffer{data: make([]byte, 0, 512)}
 	},
 }
 
@@ -343,8 +348,8 @@ func formatSSE(eventType string, data any) string {
 	size := 7 + len(eventType) + 7 + len(jsonData) + 2
 
 	// Get buffer from pool
-	bufPtr := sseBufferPool.Get().([]byte)
-	buf := bufPtr[:0]
+	bufWrapper := sseBufferPool.Get().(*sseBuffer)
+	buf := bufWrapper.data[:0]
 
 	// Grow if needed
 	if cap(buf) < size {
@@ -361,7 +366,8 @@ func formatSSE(eventType string, data any) string {
 	result := string(buf)
 
 	// Return buffer to pool
-	sseBufferPool.Put(buf[:0])
+	bufWrapper.data = buf[:0]
+	sseBufferPool.Put(bufWrapper)
 
 	return result
 }
@@ -385,11 +391,6 @@ func emitTextDeltaTo(result *strings.Builder, text string, state *ClaudeStreamSt
 	}))
 }
 
-func emitTextDelta(text string, state *ClaudeStreamState) string {
-	var result strings.Builder
-	emitTextDeltaTo(&result, text, state)
-	return result.String()
-}
 
 // emitThinkingDeltaTo writes thinking delta SSE to builder.
 func emitThinkingDeltaTo(result *strings.Builder, thinking string, state *ClaudeStreamState) {
@@ -410,11 +411,6 @@ func emitThinkingDeltaTo(result *strings.Builder, thinking string, state *Claude
 	}))
 }
 
-func emitThinkingDelta(thinking string, state *ClaudeStreamState) string {
-	var result strings.Builder
-	emitThinkingDeltaTo(&result, thinking, state)
-	return result.String()
-}
 
 // emitToolCallTo writes tool call SSE to builder.
 func emitToolCallTo(result *strings.Builder, tc *ir.ToolCall, state *ClaudeStreamState) {
@@ -446,11 +442,6 @@ func emitToolCallTo(result *strings.Builder, tc *ir.ToolCall, state *ClaudeStrea
 	result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]any{"type": ir.ClaudeSSEContentBlockStop, "index": idx}))
 }
 
-func emitToolCall(tc *ir.ToolCall, state *ClaudeStreamState) string {
-	var result strings.Builder
-	emitToolCallTo(&result, tc, state)
-	return result.String()
-}
 
 // emitFinishTo writes finish SSE to builder.
 func emitFinishTo(result *strings.Builder, usage *ir.Usage, state *ClaudeStreamState) {
@@ -466,11 +457,6 @@ func emitFinishTo(result *strings.Builder, usage *ir.Usage, state *ClaudeStreamS
 	result.WriteString(formatSSE(ir.ClaudeSSEMessageStop, map[string]any{"type": ir.ClaudeSSEMessageStop}))
 }
 
-func emitFinish(usage *ir.Usage, state *ClaudeStreamState) string {
-	var result strings.Builder
-	emitFinishTo(&result, usage, state)
-	return result.String()
-}
 
 func errMsg(err error) string {
 	if err != nil {

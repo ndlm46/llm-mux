@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	. "github.com/nghyane/llm-mux/internal/constant"
+	"github.com/nghyane/llm-mux/internal/constant"
 	"github.com/nghyane/llm-mux/internal/interfaces"
 	"github.com/nghyane/llm-mux/internal/registry"
 	"github.com/nghyane/llm-mux/sdk/api/handlers"
@@ -25,7 +25,7 @@ func NewGeminiAPIHandler(apiHandlers *handlers.BaseAPIHandler) *GeminiAPIHandler
 }
 
 func (h *GeminiAPIHandler) HandlerType() string {
-	return Gemini
+	return constant.Gemini
 }
 
 func (h *GeminiAPIHandler) Models() []map[string]any {

@@ -34,7 +34,6 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 		execCtx := ctx
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		resp, errExec := executor.Execute(execCtx, auth, req, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: req.Model, Success: errExec == nil}
@@ -81,7 +80,6 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 		execCtx := ctx
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		resp, errExec := executor.CountTokens(execCtx, auth, req, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: req.Model, Success: errExec == nil}
@@ -128,7 +126,6 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 		execCtx := ctx
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 		chunks, errStream := executor.ExecuteStream(execCtx, auth, req, opts)
 		if errStream != nil {

@@ -5,7 +5,6 @@ package misc
 
 import (
 	"embed"
-	_ "embed"
 	"strings"
 )
 
@@ -19,22 +18,20 @@ func CodexInstructionsForModel(modelName, systemInstructions string) (bool, stri
 	lastCodexPrompt := ""
 	lastCodexMaxPrompt := ""
 	last51Prompt := ""
-	// lastReviewPrompt := ""
 	for _, entry := range entries {
 		content, _ := codexInstructionsDir.ReadFile("codex_instructions/" + entry.Name())
 		if strings.HasPrefix(systemInstructions, string(content)) {
 			return true, ""
 		}
-		if strings.HasPrefix(entry.Name(), "gpt_5_codex_prompt.md") {
+		name := entry.Name()
+		if strings.HasPrefix(name, "gpt_5_codex_prompt.md") {
 			lastCodexPrompt = string(content)
-		} else if strings.HasPrefix(entry.Name(), "gpt-5.1-codex-max_prompt.md") {
+		} else if strings.HasPrefix(name, "gpt-5.1-codex-max_prompt.md") {
 			lastCodexMaxPrompt = string(content)
-		} else if strings.HasPrefix(entry.Name(), "prompt.md") {
+		} else if strings.HasPrefix(name, "prompt.md") {
 			lastPrompt = string(content)
-		} else if strings.HasPrefix(entry.Name(), "gpt_5_1_prompt.md") {
+		} else if strings.HasPrefix(name, "gpt_5_1_prompt.md") {
 			last51Prompt = string(content)
-		} else if strings.HasPrefix(entry.Name(), "review_prompt.md") {
-			// lastReviewPrompt = string(content)
 		}
 	}
 	if strings.Contains(modelName, "codex-max") {

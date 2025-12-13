@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	. "github.com/nghyane/llm-mux/internal/constant"
+	"github.com/nghyane/llm-mux/internal/constant"
 	"github.com/nghyane/llm-mux/internal/interfaces"
 	"github.com/nghyane/llm-mux/internal/registry"
 	"github.com/nghyane/llm-mux/sdk/api/handlers"
@@ -31,7 +31,7 @@ func NewClaudeCodeAPIHandler(apiHandlers *handlers.BaseAPIHandler) *ClaudeCodeAP
 }
 
 func (h *ClaudeCodeAPIHandler) HandlerType() string {
-	return Claude
+	return constant.Claude
 }
 
 func (h *ClaudeCodeAPIHandler) Models() []map[string]any {

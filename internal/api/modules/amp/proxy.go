@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -172,12 +171,6 @@ func isStreamingResponse(resp *http.Response) bool {
 	return false
 }
 
-// proxyHandler converts httputil.ReverseProxy to gin.HandlerFunc
-func proxyHandler(proxy *httputil.ReverseProxy) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		proxy.ServeHTTP(c.Writer, c.Request)
-	}
-}
 
 // filterBetaFeatures removes a specific beta feature from comma-separated list
 func filterBetaFeatures(header, featureToRemove string) string {

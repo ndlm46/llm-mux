@@ -17,11 +17,10 @@ import (
 
 // Cached format constants for TranslateTokenCount (only remaining use of sdktranslator)
 var (
-	formatOpenAI    = sdktranslator.FromString("openai")
-	formatGemini    = sdktranslator.FromString("gemini")
-	formatGeminiCLI = sdktranslator.FromString("gemini-cli")
-	formatCodex     = sdktranslator.FromString("codex")
-	formatClaude    = sdktranslator.FromString("claude")
+	formatOpenAI = sdktranslator.FromString("openai")
+	formatGemini = sdktranslator.FromString("gemini")
+	formatCodex  = sdktranslator.FromString("codex")
+	formatClaude = sdktranslator.FromString("claude")
 )
 
 // sanitizeUndefinedValues removes "[undefined]" literal strings from JSON payload.

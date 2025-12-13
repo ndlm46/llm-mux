@@ -176,8 +176,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		}()
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(make([]byte, 64*1024), DefaultStreamBufferSize)
-		var streamState *OpenAIStreamState
-		streamState = &OpenAIStreamState{}
+		streamState := &OpenAIStreamState{}
 		messageID := "chatcmpl-" + req.Model
 		for scanner.Scan() {
 			line := scanner.Bytes()
