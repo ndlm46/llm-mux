@@ -139,8 +139,11 @@ func convertRequestToIR(from sdktranslator.Format, model string, payload []byte,
 // Note: Antigravity uses the same format as Gemini CLI, so this function works for both.
 func TranslateToGeminiCLI(cfg *config.Config, from sdktranslator.Format, model string, payload []byte, streaming bool, metadata map[string]any) ([]byte, error) {
 	// Early passthrough for gemini formats - preserves responseSchema, responseMimeType, etc.
+	// EXCEPT for Claude models: they need IR processing to ensure functionCall/functionResponse
+	// have proper id fields (Vertex Claude API requires tool_use.id to match tool_result.tool_use_id)
 	fromStr := from.String()
-	if fromStr == "gemini" || fromStr == "gemini-cli" {
+	isClaudeModel := strings.Contains(model, "claude")
+	if (fromStr == "gemini" || fromStr == "gemini-cli") && !isClaudeModel {
 		// Wrap in CLI envelope format: {"request": <original payload>}
 		cliPayload, _ := sjson.SetRawBytes([]byte(`{}`), "request", payload)
 		return applyPayloadConfigToIR(cfg, model, cliPayload), nil

@@ -376,8 +376,9 @@ func GetGeminiCLIModels() []*ModelInfo {
 			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
 		},
 		// Claude models via Antigravity (Google Cloud Code API)
+		// Use canonical names directly (no gemini- prefix) for simpler routing
 		{
-			ID:                         "gemini-claude-sonnet-4-5",
+			ID:                         "claude-sonnet-4-5",
 			Object:                     "model",
 			Created:                    1759104000,
 			OwnedBy:                    "anthropic",
@@ -392,7 +393,7 @@ func GetGeminiCLIModels() []*ModelInfo {
 			SupportedGenerationMethods: []string{"generateContent"},
 		},
 		{
-			ID:                         "gemini-claude-sonnet-4-5-thinking",
+			ID:                         "claude-sonnet-4-5-thinking",
 			Object:                     "model",
 			Created:                    1759104000,
 			OwnedBy:                    "anthropic",
@@ -408,7 +409,7 @@ func GetGeminiCLIModels() []*ModelInfo {
 			Thinking:                   &ThinkingSupport{Min: 1024, Max: 100000, ZeroAllowed: false, DynamicAllowed: true},
 		},
 		{
-			ID:                         "gemini-claude-opus-4-5-thinking",
+			ID:                         "claude-opus-4-5-thinking",
 			Object:                     "model",
 			Created:                    1761955200,
 			OwnedBy:                    "anthropic",

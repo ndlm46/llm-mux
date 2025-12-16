@@ -4,6 +4,7 @@ package from_ir
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/nghyane/llm-mux/internal/translator/ir"
@@ -850,17 +851,17 @@ func ToResponsesAPIResponse(messages []ir.Message, usage *ir.Usage, model string
 // Responses API streaming uses semantic events (response.output_text.delta, etc.)
 // and requires tracking state across multiple events to build proper "done" events.
 type ResponsesStreamState struct {
-	Seq             int            // Sequence number for events (required by Responses API)
-	ResponseID      string         // Response ID (generated once, reused for all events)
-	Created         int64          // Creation timestamp
-	Started         bool           // Whether initial events (response.created, response.in_progress) were sent
-	ReasoningID     string         // ID for reasoning output item (if any)
-	MsgID           string         // ID for message output item (if any)
-	TextBuffer      string         // Accumulated text content (needed for "done" event)
-	ReasoningBuffer string         // Accumulated reasoning content
-	FuncCallIDs     map[int]string // Tool call IDs by index
-	FuncNames       map[int]string // Tool call names by index
-	FuncArgsBuffer  map[int]string // Accumulated tool call arguments by index
+	Seq             int                      // Sequence number for events (required by Responses API)
+	ResponseID      string                   // Response ID (generated once, reused for all events)
+	Created         int64                    // Creation timestamp
+	Started         bool                     // Whether initial events (response.created, response.in_progress) were sent
+	ReasoningID     string                   // ID for reasoning output item (if any)
+	MsgID           string                   // ID for message output item (if any)
+	TextBuffer      strings.Builder          // Accumulated text content (needed for "done" event)
+	ReasoningBuffer strings.Builder          // Accumulated reasoning content
+	FuncCallIDs     map[int]string           // Tool call IDs by index
+	FuncNames       map[int]string           // Tool call names by index
+	FuncArgsBuffer  map[int]*strings.Builder // Accumulated tool call arguments by index
 }
 
 // NewResponsesStreamState creates a new streaming state for Responses API.
@@ -868,8 +869,22 @@ func NewResponsesStreamState() *ResponsesStreamState {
 	return &ResponsesStreamState{
 		FuncCallIDs:    make(map[int]string),
 		FuncNames:      make(map[int]string),
-		FuncArgsBuffer: make(map[int]string),
+		FuncArgsBuffer: make(map[int]*strings.Builder),
 	}
+}
+
+// formatResponsesSSE formats an SSE event efficiently for Responses API.
+func formatResponsesSSE(eventType string, jsonData []byte) string {
+	// Pre-calculate size: "event: " + type + "\ndata: " + json + "\n\n"
+	size := 7 + len(eventType) + 7 + len(jsonData) + 2
+	var b strings.Builder
+	b.Grow(size)
+	b.WriteString("event: ")
+	b.WriteString(eventType)
+	b.WriteString("\ndata: ")
+	b.Write(jsonData)
+	b.WriteString("\n\n")
+	return b.String()
 }
 
 // ToResponsesAPIChunk converts event to Responses API SSE streaming chunks.
@@ -882,7 +897,8 @@ func ToResponsesAPIChunk(event ir.UnifiedEvent, model string, state *ResponsesSt
 	}
 
 	nextSeq := func() int { state.Seq++; return state.Seq }
-	var out []string
+	// Pre-allocate: most common case is 1 event, max is ~5 for first token or finish
+	out := make([]string, 0, 4)
 
 	if !state.Started {
 		for _, t := range []string{"response.created", "response.in_progress"} {
@@ -892,7 +908,7 @@ func ToResponsesAPIChunk(event ir.UnifiedEvent, model string, state *ResponsesSt
 					"id": state.ResponseID, "object": "response", "created_at": state.Created, "status": "in_progress",
 				},
 			})
-			out = append(out, fmt.Sprintf("event: %s\ndata: %s\n\n", t, string(b)))
+			out = append(out, formatResponsesSSE(t, b))
 		}
 		state.Started = true
 	}
@@ -905,19 +921,19 @@ func ToResponsesAPIChunk(event ir.UnifiedEvent, model string, state *ResponsesSt
 				"type": "response.output_item.added", "sequence_number": nextSeq(), "output_index": 0,
 				"item": map[string]any{"id": state.MsgID, "type": "message", "status": "in_progress", "role": "assistant", "content": []any{}},
 			})
-			out = append(out, fmt.Sprintf("event: response.output_item.added\ndata: %s\n\n", string(b1)))
+			out = append(out, formatResponsesSSE("response.output_item.added", b1))
 			b2, _ := json.Marshal(map[string]any{
 				"type": "response.content_part.added", "sequence_number": nextSeq(), "item_id": state.MsgID,
 				"output_index": 0, "content_index": 0, "part": map[string]any{"type": "output_text", "text": ""},
 			})
-			out = append(out, fmt.Sprintf("event: response.content_part.added\ndata: %s\n\n", string(b2)))
+			out = append(out, formatResponsesSSE("response.content_part.added", b2))
 		}
-		state.TextBuffer += event.Content
+		state.TextBuffer.WriteString(event.Content)
 		b, _ := json.Marshal(map[string]any{
 			"type": "response.output_text.delta", "sequence_number": nextSeq(), "item_id": state.MsgID,
 			"output_index": 0, "content_index": 0, "delta": event.Content,
 		})
-		out = append(out, fmt.Sprintf("event: response.output_text.delta\ndata: %s\n\n", string(b)))
+		out = append(out, formatResponsesSSE("response.output_text.delta", b))
 
 	case ir.EventTypeReasoning, ir.EventTypeReasoningSummary:
 		text := event.Reasoning
@@ -930,14 +946,14 @@ func ToResponsesAPIChunk(event ir.UnifiedEvent, model string, state *ResponsesSt
 				"type": "response.output_item.added", "sequence_number": nextSeq(), "output_index": 0,
 				"item": map[string]any{"id": state.ReasoningID, "type": "reasoning", "status": "in_progress", "summary": []any{}},
 			})
-			out = append(out, fmt.Sprintf("event: response.output_item.added\ndata: %s\n\n", string(b)))
+			out = append(out, formatResponsesSSE("response.output_item.added", b))
 		}
-		state.ReasoningBuffer += text
+		state.ReasoningBuffer.WriteString(text)
 		b, _ := json.Marshal(map[string]any{
 			"type": "response.reasoning_summary_text.delta", "sequence_number": nextSeq(), "item_id": state.ReasoningID,
 			"output_index": 0, "content_index": 0, "delta": text,
 		})
-		out = append(out, fmt.Sprintf("event: response.reasoning_summary_text.delta\ndata: %s\n\n", string(b)))
+		out = append(out, formatResponsesSSE("response.reasoning_summary_text.delta", b))
 
 	case ir.EventTypeToolCall:
 		idx := event.ToolCallIndex
@@ -951,7 +967,7 @@ func ToResponsesAPIChunk(event ir.UnifiedEvent, model string, state *ResponsesSt
 					"call_id": event.ToolCall.ID, "name": event.ToolCall.Name, "arguments": "",
 				},
 			})
-			out = append(out, fmt.Sprintf("event: response.output_item.added\ndata: %s\n\n", string(b)))
+			out = append(out, formatResponsesSSE("response.output_item.added", b))
 		}
 		// For complete tool call, we might not get deltas, so we can just emit done if needed,
 		// but usually we get deltas or the full args. If we get full args here:
@@ -960,7 +976,7 @@ func ToResponsesAPIChunk(event ir.UnifiedEvent, model string, state *ResponsesSt
 				"type": "response.function_call_arguments.delta", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
 				"output_index": idx, "delta": event.ToolCall.Args,
 			})
-			out = append(out, fmt.Sprintf("event: response.function_call_arguments.delta\ndata: %s\n\n", string(b)))
+			out = append(out, formatResponsesSSE("response.function_call_arguments.delta", b))
 		}
 		b, _ := json.Marshal(map[string]any{
 			"type": "response.output_item.done", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
@@ -969,7 +985,7 @@ func ToResponsesAPIChunk(event ir.UnifiedEvent, model string, state *ResponsesSt
 				"call_id": event.ToolCall.ID, "name": event.ToolCall.Name, "arguments": event.ToolCall.Args,
 			},
 		})
-		out = append(out, fmt.Sprintf("event: response.output_item.done\ndata: %s\n\n", string(b)))
+		out = append(out, formatResponsesSSE("response.output_item.done", b))
 
 	case ir.EventTypeToolCallDelta:
 		idx := event.ToolCallIndex
@@ -982,40 +998,45 @@ func ToResponsesAPIChunk(event ir.UnifiedEvent, model string, state *ResponsesSt
 					"call_id": event.ToolCall.ID, "name": "", "arguments": "",
 				},
 			})
-			out = append(out, fmt.Sprintf("event: response.output_item.added\ndata: %s\n\n", string(b)))
+			out = append(out, formatResponsesSSE("response.output_item.added", b))
 		}
-		state.FuncArgsBuffer[idx] += event.ToolCall.Args
+		if state.FuncArgsBuffer[idx] == nil {
+			state.FuncArgsBuffer[idx] = &strings.Builder{}
+		}
+		state.FuncArgsBuffer[idx].WriteString(event.ToolCall.Args)
 		b, _ := json.Marshal(map[string]any{
 			"type": "response.function_call_arguments.delta", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
 			"output_index": idx, "delta": event.ToolCall.Args,
 		})
-		out = append(out, fmt.Sprintf("event: response.function_call_arguments.delta\ndata: %s\n\n", string(b)))
+		out = append(out, formatResponsesSSE("response.function_call_arguments.delta", b))
 
 	case ir.EventTypeFinish:
+		textContent := state.TextBuffer.String()
+		reasoningContent := state.ReasoningBuffer.String()
 		if state.MsgID != "" {
 			b1, _ := json.Marshal(map[string]any{
 				"type": "response.content_part.done", "sequence_number": nextSeq(), "item_id": state.MsgID,
-				"output_index": 0, "content_index": 0, "part": map[string]any{"type": "output_text", "text": state.TextBuffer},
+				"output_index": 0, "content_index": 0, "part": map[string]any{"type": "output_text", "text": textContent},
 			})
-			out = append(out, fmt.Sprintf("event: response.content_part.done\ndata: %s\n\n", string(b1)))
+			out = append(out, formatResponsesSSE("response.content_part.done", b1))
 			b2, _ := json.Marshal(map[string]any{
 				"type": "response.output_item.done", "sequence_number": nextSeq(), "output_index": 0,
 				"item": map[string]any{
 					"id": state.MsgID, "type": "message", "status": "completed", "role": "assistant",
-					"content": []any{map[string]any{"type": "output_text", "text": state.TextBuffer}},
+					"content": []any{map[string]any{"type": "output_text", "text": textContent}},
 				},
 			})
-			out = append(out, fmt.Sprintf("event: response.output_item.done\ndata: %s\n\n", string(b2)))
+			out = append(out, formatResponsesSSE("response.output_item.done", b2))
 		}
 		if state.ReasoningID != "" {
 			b, _ := json.Marshal(map[string]any{
 				"type": "response.output_item.done", "sequence_number": nextSeq(), "output_index": 0,
 				"item": map[string]any{
 					"id": state.ReasoningID, "type": "reasoning", "status": "completed",
-					"summary": []any{map[string]any{"type": "summary_text", "text": state.ReasoningBuffer}},
+					"summary": []any{map[string]any{"type": "summary_text", "text": reasoningContent}},
 				},
 			})
-			out = append(out, fmt.Sprintf("event: response.output_item.done\ndata: %s\n\n", string(b)))
+			out = append(out, formatResponsesSSE("response.output_item.done", b))
 		}
 
 		usageMap := map[string]any{}
@@ -1038,7 +1059,7 @@ func ToResponsesAPIChunk(event ir.UnifiedEvent, model string, state *ResponsesSt
 				"usage": usageMap,
 			},
 		})
-		out = append(out, fmt.Sprintf("event: response.done\ndata: %s\n\n", string(b)))
+		out = append(out, formatResponsesSSE("response.done", b))
 	}
 
 	return out, nil

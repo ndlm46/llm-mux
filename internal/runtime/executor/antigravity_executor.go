@@ -17,7 +17,7 @@ import (
 	"github.com/nghyane/llm-mux/internal/config"
 	"github.com/nghyane/llm-mux/internal/oauth"
 	"github.com/nghyane/llm-mux/internal/registry"
-	"github.com/nghyane/llm-mux/internal/translator/ir"
+	// "github.com/nghyane/llm-mux/internal/translator/ir"
 	cliproxyauth "github.com/nghyane/llm-mux/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/nghyane/llm-mux/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -177,11 +177,6 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 
 	from := opts.SourceFormat
 
-	// Debug: log incoming request for Claude models
-	if strings.Contains(req.Model, "claude") {
-		log.Infof("antigravity: INCOMING CLAUDE STREAM REQUEST (model=%s): %s", req.Model, string(req.Payload))
-	}
-
 	// Translate request using canonical translator
 	translated, errTranslate := TranslateToGeminiCLI(e.cfg, from, req.Model, bytes.Clone(req.Payload), true, req.Metadata)
 	if errTranslate != nil {
@@ -259,16 +254,8 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			streamState := NewAntigravityStreamState(opts.OriginalRequest)
 			messageID := "chatcmpl-" + req.Model
 
-			// Debug: track if this is a Claude model for logging
-			isClaudeModel := strings.Contains(req.Model, "claude")
-
 			for scanner.Scan() {
 				line := scanner.Bytes()
-
-				// Debug: log raw stream chunks for Claude models
-				if isClaudeModel {
-					log.Infof("antigravity: RAW CLAUDE STREAM CHUNK (model=%s): %s", req.Model, strings.ReplaceAll(string(line), "\n", "\\n"))
-				}
 
 				// Filter usage metadata for all models
 				// Only retain usage statistics in the terminal chunk
@@ -821,15 +808,13 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 								if schema["properties"] == nil {
 									schema["properties"] = map[string]any{}
 								}
-								// Claude-specific cleaning - keep $schema for Claude Vertex API validation
-								// Gemini models don't accept $schema field, so we only add it for Claude
-								if strings.Contains(modelName, "claude") {
-									ir.CleanJsonSchemaForClaude(schema)
-									// $schema is kept for Claude (added by CleanJsonSchemaForClaude)
-								} else {
-									// Remove $schema for non-Claude models (Gemini rejects it)
-									delete(schema, "$schema")
-								}
+								// Remove $schema for all models (Gemini API rejects it in functionDeclarations)
+								delete(schema, "$schema")
+
+								// Note: We MUST NOT use CleanJsonSchemaForClaude here.
+								// Antigravity expects standard Gemini/OpenAPI parameter schemas.
+								// It handles the conversion to Claude's input_schema internally.
+
 								fdm["parameters"] = schema
 								delete(fdm, "parametersJsonSchema")
 							}
@@ -881,12 +866,10 @@ func modelName2Alias(modelName string) string {
 		return "gemini-3-pro-image-preview"
 	case "gemini-3-pro-high":
 		return "gemini-3-pro-preview"
-	case "claude-sonnet-4-5":
-		return "gemini-claude-sonnet-4-5"
-	case "claude-sonnet-4-5-thinking":
-		return "gemini-claude-sonnet-4-5-thinking"
-	case "claude-opus-4-5-thinking":
-		return "gemini-claude-opus-4-5-thinking"
+	// Claude models: keep canonical names (no gemini- prefix)
+	// This allows direct lookup via CanonicalID without extra mapping
+	case "claude-sonnet-4-5", "claude-sonnet-4-5-thinking", "claude-opus-4-5-thinking":
+		return modelName
 	case "chat_20706", "chat_23310", "gemini-2.5-flash-thinking", "gemini-3-pro-low", "gemini-2.5-pro":
 		return ""
 	default:
@@ -902,11 +885,13 @@ func alias2ModelName(modelName string) string {
 		return "gemini-3-pro-image"
 	case "gemini-3-pro-preview":
 		return "gemini-3-pro-high"
-	case "gemini-claude-sonnet-4-5":
+	// Claude models: accept both prefixed and canonical names
+	// Maps to upstream model name for API call
+	case "gemini-claude-sonnet-4-5", "claude-sonnet-4-5":
 		return "claude-sonnet-4-5"
-	case "gemini-claude-sonnet-4-5-thinking":
+	case "gemini-claude-sonnet-4-5-thinking", "claude-sonnet-4-5-thinking":
 		return "claude-sonnet-4-5-thinking"
-	case "gemini-claude-opus-4-5-thinking":
+	case "gemini-claude-opus-4-5-thinking", "claude-opus-4-5-thinking":
 		return "claude-opus-4-5-thinking"
 	default:
 		return modelName

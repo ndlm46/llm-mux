@@ -310,65 +310,7 @@ func (p *GeminiProvider) applyMessages(root map[string]any, req *ir.UnifiedChatR
 						"id":   tcID,
 					}
 
-					if len(resultPart.Images) > 0 || len(resultPart.Files) > 0 {
-						// Multimodal function response
-						var responseObj any
-						if parsed := gjson.Parse(resultPart.Result); parsed.Type == gjson.JSON {
-							var jsonObj any
-							if err := json.Unmarshal([]byte(resultPart.Result), &jsonObj); err == nil {
-								if _, isArray := jsonObj.([]any); isArray {
-									responseObj = map[string]any{"result": jsonObj}
-								} else {
-									responseObj = jsonObj
-								}
-							} else {
-								responseObj = map[string]any{"content": resultPart.Result}
-							}
-						} else {
-							responseObj = map[string]any{"content": resultPart.Result}
-						}
-						funcResp["response"] = responseObj
-
-						var nestedParts []any
-						for _, img := range resultPart.Images {
-							nestedParts = append(nestedParts, map[string]any{
-								"inlineData": map[string]any{
-									"mimeType": img.MimeType,
-									"data":     img.Data,
-								},
-							})
-						}
-						for _, f := range resultPart.Files {
-							nestedParts = append(nestedParts, map[string]any{
-								"inlineData": map[string]any{ // Use inlineData for small files or fileData for GCS?
-									// The doc says "Each multimodal part must contain inlineData or fileData."
-									// If we have base64 data, use inlineData.
-									"mimeType": "application/pdf", // Default or detect? FilePart doesn't have MimeType?
-									"data":     f.FileData,
-								},
-							})
-						}
-
-						if len(nestedParts) > 0 {
-						}
-					} else {
-						var responseObj any
-						if parsed := gjson.Parse(resultPart.Result); parsed.Type == gjson.JSON {
-							var jsonObj any
-							if err := json.Unmarshal([]byte(resultPart.Result), &jsonObj); err == nil {
-								if _, isArray := jsonObj.([]any); isArray {
-									responseObj = map[string]any{"result": jsonObj}
-								} else {
-									responseObj = jsonObj
-								}
-							} else {
-								responseObj = map[string]any{"content": resultPart.Result}
-							}
-						} else {
-							responseObj = map[string]any{"content": resultPart.Result}
-						}
-						funcResp["response"] = responseObj
-					}
+					funcResp["response"] = buildFunctionResponseObject(resultPart.Result)
 
 					responseParts = append(responseParts, map[string]any{
 						"functionResponse": funcResp,
@@ -882,4 +824,21 @@ func isValidThoughtSignature(ts []byte) bool {
 		return false
 	}
 	return true
+}
+
+// buildFunctionResponseObject parses tool result into Gemini function response format.
+func buildFunctionResponseObject(result string) any {
+	if result == "" {
+		return map[string]any{"content": ""}
+	}
+	if parsed := gjson.Parse(result); parsed.Type == gjson.JSON {
+		var jsonObj any
+		if err := json.Unmarshal([]byte(result), &jsonObj); err == nil {
+			if _, isArray := jsonObj.([]any); isArray {
+				return map[string]any{"result": jsonObj}
+			}
+			return jsonObj
+		}
+	}
+	return map[string]any{"content": result}
 }
