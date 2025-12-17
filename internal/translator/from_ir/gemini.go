@@ -225,6 +225,17 @@ func (p *GeminiProvider) applyGenerationConfig(root map[string]any, req *ir.Unif
 		}
 	}
 
+	// Validation: Ensure maxOutputTokens is >= 1 (Vertex/Gemini requirement)
+	if v, ok := genConfig["maxOutputTokens"].(int); ok {
+		if v < 1 {
+			genConfig["maxOutputTokens"] = 1024 // Safe default
+		}
+	} else if v32, ok := genConfig["maxOutputTokens"].(int32); ok {
+		if v32 < 1 {
+			genConfig["maxOutputTokens"] = 1024 // Safe default
+		}
+	}
+
 	if len(genConfig) > 0 {
 		root["generationConfig"] = genConfig
 	}

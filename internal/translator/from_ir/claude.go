@@ -105,17 +105,16 @@ func (p *ClaudeProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, err
 	// Check if thinking is enabled for this request
 	thinkingEnabled := false
 	if req.Thinking != nil {
-		budget := int32(0)
-		if req.Thinking.ThinkingBudget != nil {
-			budget = *req.Thinking.ThinkingBudget
-		}
-		if (req.Thinking.IncludeThoughts && budget != 0) || (budget > 0) {
-			thinkingEnabled = true
-		}
+		fmt.Printf("DEBUG: req.Thinking present. IncludeThoughts=%v, Budget=%v\n", req.Thinking.IncludeThoughts, req.Thinking.ThinkingBudget)
+		// Relaxed check: if Thinking struct exists, we likely need to comply
+		thinkingEnabled = true
+	} else {
+		fmt.Printf("DEBUG: req.Thinking is nil\n")
 	}
 
 	var messages []any
-	for _, msg := range req.Messages {
+	for i, msg := range req.Messages {
+		fmt.Printf("DEBUG: Processing message %d role=%s content_len=%d tools_len=%d\n", i, msg.Role, len(msg.Content), len(msg.ToolCalls))
 		switch msg.Role {
 		case ir.RoleSystem:
 			if text := ir.CombineTextParts(msg); text != "" {
