@@ -34,6 +34,7 @@ type ClaudeStreamState struct {
 	CurrentBlockType string // "text" or "thinking"
 	TextBlockIndex   int    // Current block index
 	HasToolCalls     bool
+	HasTextContent   bool // Track if we emitted text (not just thinking)
 	FinishSent       bool
 }
 
@@ -425,6 +426,7 @@ func formatSSE(eventType string, data any) string {
 func emitTextDeltaTo(result *strings.Builder, text string, state *ClaudeStreamState) {
 	idx := 0
 	if state != nil {
+		state.HasTextContent = true // Mark that we have text content
 		// Switch block if needed
 		if state.TextBlockStarted && state.CurrentBlockType != ir.ClaudeBlockText {
 			result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]any{
@@ -445,7 +447,7 @@ func emitTextDeltaTo(result *strings.Builder, text string, state *ClaudeStreamSt
 		}
 	}
 	result.WriteString(formatSSE(ir.ClaudeSSEContentBlockDelta, map[string]any{
-		"type": ir.ClaudeSSEContentBlockDelta, "index": idx,
+		"type": ir.EventTypeToken, "index": idx,
 		"delta": map[string]any{"type": "text_delta", "text": text},
 	}))
 }
@@ -516,6 +518,27 @@ func emitToolCallTo(result *strings.Builder, tc *ir.ToolCall, state *ClaudeStrea
 
 // emitFinishTo writes finish SSE to builder.
 func emitFinishTo(result *strings.Builder, usage *ir.Usage, state *ClaudeStreamState) {
+	// Client requirement: If we only emitted thinking (no text, no tool calls), inject empty text block
+	if state != nil && !state.HasTextContent && !state.HasToolCalls {
+		// Close thinking block if open
+		if state.TextBlockStarted {
+			result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]any{
+				"type": ir.ClaudeSSEContentBlockStop, "index": state.TextBlockIndex,
+			}))
+			state.TextBlockStarted = false
+			state.TextBlockIndex++
+		}
+		// Emit empty text block
+		idx := state.TextBlockIndex
+		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStart, map[string]any{
+			"type": ir.ClaudeSSEContentBlockStart, "index": idx,
+			"content_block": map[string]any{"type": ir.ClaudeBlockText, "text": ""},
+		}))
+		result.WriteString(formatSSE(ir.ClaudeSSEContentBlockStop, map[string]any{
+			"type": ir.ClaudeSSEContentBlockStop, "index": idx,
+		}))
+	}
+
 	stopReason := ir.ClaudeStopEndTurn
 	if state != nil && state.HasToolCalls {
 		stopReason = ir.ClaudeStopToolUse
