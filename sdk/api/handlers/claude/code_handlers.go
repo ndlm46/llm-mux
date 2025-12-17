@@ -1,7 +1,6 @@
 package claude
 
 import (
-	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -9,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/nghyane/llm-mux/internal/constant"
@@ -151,34 +149,20 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 }
 
 func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
-	writer := bufio.NewWriterSize(c.Writer, 16*1024)
-	ticker := time.NewTicker(120 * time.Millisecond)
-	defer ticker.Stop()
-
 	for {
 		select {
 		case <-c.Request.Context().Done():
-			_ = writer.Flush()
 			cancel(c.Request.Context().Err())
 			return
 
-		case <-ticker.C:
-			if writer.Buffered() >= 8*1024 {
-				if err := writer.Flush(); err != nil {
-					cancel(err)
-					return
-				}
-				flusher.Flush()
-			}
-
 		case chunk, ok := <-data:
 			if !ok {
-				_ = writer.Flush()
 				cancel(nil)
 				return
 			}
 			if len(chunk) > 0 {
-				_, _ = writer.Write(chunk)
+				_, _ = c.Writer.Write(chunk)
+				flusher.Flush()
 			}
 
 		case errMsg, ok := <-errs:
@@ -188,11 +172,11 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 			if errMsg != nil {
 				// An error occurred: emit as a proper SSE error event
 				errorBytes, _ := json.Marshal(h.toClaudeError(errMsg))
-				_, _ = writer.WriteString("event: error\n")
-				_, _ = writer.WriteString("data: ")
-				_, _ = writer.Write(errorBytes)
-				_, _ = writer.WriteString("\n\n")
-				_ = writer.Flush()
+				_, _ = c.Writer.WriteString("event: error\n")
+				_, _ = c.Writer.WriteString("data: ")
+				_, _ = c.Writer.Write(errorBytes)
+				_, _ = c.Writer.WriteString("\n\n")
+				flusher.Flush()
 			}
 			var execErr error
 			if errMsg != nil {
