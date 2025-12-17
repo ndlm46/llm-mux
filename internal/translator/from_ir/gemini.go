@@ -314,59 +314,49 @@ func (p *GeminiProvider) applyMessages(root map[string]any, req *ir.UnifiedChatR
 			var responseParts []any
 
 			if len(msg.ToolCalls) > 0 {
+				// Claude Constraint: If using tools, MUST start with thinking block.
+				// If history lacks thinking, we need to understand WHY and WHAT matches upstream schema.
 				isClaude := strings.Contains(req.Model, "claude")
+
+				// DEBUG TRACE: Log the state when thinking is missing for Claude with tools
+				if isClaude && !hasThinking {
+					log.Warnf("gemini-translator: [CLAUDE_TRACE] Missing thinking block for message with tool calls! Msg content len: %d", len(msg.Content))
+					// Temporary fallback: Revert to NO SHIM to inspect raw error behavior again or allow manual shim testing
+					// For now, we will NOT inject a shim to avoid signature errors, but we will log heavily.
+				}
 
 				toolCallIDs := make([]string, 0, len(msg.ToolCalls))
 
-				// 2a. Handle Broken History (Claude + Tool - Thinking)
-				// If we are sending to Claude (which requires Thinking before Tools)
-				// and this historical message has NO thinking logic, we CANNOT send real tool calls.
-				// Any attempt to "shim" a thinking block will fail signature validation (Vertex/Antigravity).
-				// Solution: Convert these historical tool calls to [Text Representation] so context is preserved
-				// but protocol rules are not violated.
-				if isClaude && !hasThinking {
-					textParts := make([]string, 0, len(msg.ToolCalls))
-					for _, tc := range msg.ToolCalls {
-						args := ir.ValidateAndNormalizeJSON(tc.Args)
-						textParts = append(textParts, fmt.Sprintf("[Historical Tool Call: %s(args=%s)]", tc.Name, args))
+				for i := range msg.ToolCalls {
+					tc := &msg.ToolCalls[i]
+					argsJSON := ir.ValidateAndNormalizeJSON(tc.Args)
+					fcMap := map[string]any{
+						"name": tc.Name,
+						"args": json.RawMessage(argsJSON),
 					}
-					// Add explanation and tool dump to text part
-					parts = append(parts, map[string]any{
-						"text": fmt.Sprintf("\n%s", strings.Join(textParts, "\n")),
-					})
-					// DO NOT process as actual functionCall parts
-					// This effectively "downgrades" the tool call to text history
-				} else {
-					// 2b. Standard Tool Processing (Valid History or Non-Claude)
-					for i := range msg.ToolCalls {
-						tc := &msg.ToolCalls[i]
-						argsJSON := ir.ValidateAndNormalizeJSON(tc.Args)
-						fcMap := map[string]any{
-							"name": tc.Name,
-							"args": json.RawMessage(argsJSON),
-						}
-						toolID := tc.ID
-						if toolID == "" {
-							toolID = fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), i)
-						}
-						fcMap["id"] = toolID
+					toolID := tc.ID
+					if toolID == "" {
+						toolID = fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), i)
+					}
+					fcMap["id"] = toolID
 
-						part := map[string]any{
-							"functionCall": fcMap,
-						}
-						if len(tc.ThoughtSignature) > 0 {
-							part["thoughtSignature"] = string(tc.ThoughtSignature)
-						} else if i == 0 {
-							part["thoughtSignature"] = "skip_thought_signature_validator"
-						}
-						parts = append(parts, part)
-						toolCallIDs = append(toolCallIDs, toolID)
+					part := map[string]any{
+						"functionCall": fcMap,
 					}
+					if len(tc.ThoughtSignature) > 0 {
+						part["thoughtSignature"] = string(tc.ThoughtSignature)
+					} else if i == 0 {
+						// DEBUG TRACE: Check if this validator skip is actually needed or causing issues
+						// part["thoughtSignature"] = "skip_thought_signature_validator"
+						// Commenting out to see raw behavior
+					}
+					parts = append(parts, part)
+					toolCallIDs = append(toolCallIDs, toolID)
+				}
 
-					// If we processed real tool calls, we need to track IDs for the next turn
-					if len(toolCallIDs) > 0 {
-						// Logic to track toolCallIDs if needed for Response matching (usually handled by IR structure)
-					}
+				// If we processed real tool calls, we need to track IDs for the next turn
+				if len(toolCallIDs) > 0 {
+					// Logic to track toolCallIDs if needed for Response matching (usually handled by IR structure)
 				}
 
 				// Build Tool Results (User Response) based on IDs
