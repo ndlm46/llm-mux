@@ -4,7 +4,7 @@
  * OAuth flows, Cline uses a simple refresh token mechanism where a long-lived refresh token
  * is exchanged for short-lived JWT access tokens (~10 minutes). The refresh token is obtained
  * from the Cline VSCode extension via the "Cline: Export Auth Token" command.
- * 
+ *
  * Authentication flow:
  * 1. User exports refresh token from Cline VSCode extension
  * 2. Refresh token is stored in config or auth file
@@ -155,28 +155,9 @@ func (c *ClineAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Cl
 //   - *ClineTokenData: The refreshed token data
 //   - error: An error if all retry attempts fail
 func (c *ClineAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, maxRetries int) (*ClineTokenData, error) {
-	var lastErr error
-
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		if attempt > 0 {
-			// Wait before retry with exponential backoff
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(time.Duration(attempt) * time.Second):
-			}
-		}
-
-		tokenData, err := c.RefreshTokens(ctx, refreshToken)
-		if err == nil {
-			return tokenData, nil
-		}
-
-		lastErr = err
-		log.Warnf("Cline token refresh attempt %d failed: %v", attempt+1, err)
-	}
-
-	return nil, fmt.Errorf("token refresh failed after %d attempts: %w", maxRetries, lastErr)
+	return util.WithRetry(ctx, maxRetries, "Token refresh", func(ctx context.Context) (*ClineTokenData, error) {
+		return c.RefreshTokens(ctx, refreshToken)
+	})
 }
 
 // CreateTokenStorage creates a new ClineTokenStorage from token data.

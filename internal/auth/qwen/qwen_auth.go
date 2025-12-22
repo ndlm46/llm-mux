@@ -15,7 +15,6 @@ import (
 
 	"github.com/nghyane/llm-mux/internal/config"
 	"github.com/nghyane/llm-mux/internal/util"
-	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -310,28 +309,9 @@ func (qa *QwenAuth) PollForToken(deviceCode, codeVerifier string) (*QwenTokenDat
 
 // RefreshTokensWithRetry attempts to refresh tokens with a specified number of retries upon failure.
 func (o *QwenAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, maxRetries int) (*QwenTokenData, error) {
-	var lastErr error
-
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		if attempt > 0 {
-			// Wait before retry
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(time.Duration(attempt) * time.Second):
-			}
-		}
-
-		tokenData, err := o.RefreshTokens(ctx, refreshToken)
-		if err == nil {
-			return tokenData, nil
-		}
-
-		lastErr = err
-		log.Warnf("Token refresh attempt %d failed: %v", attempt+1, err)
-	}
-
-	return nil, fmt.Errorf("token refresh failed after %d attempts: %w", maxRetries, lastErr)
+	return util.WithRetry(ctx, maxRetries, "Token refresh", func(ctx context.Context) (*QwenTokenData, error) {
+		return o.RefreshTokens(ctx, refreshToken)
+	})
 }
 
 // CreateTokenStorage creates a QwenTokenStorage object from a QwenTokenData object.

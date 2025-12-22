@@ -299,28 +299,9 @@ func (o *ClaudeAuth) CreateTokenStorage(bundle *ClaudeAuthBundle) *ClaudeTokenSt
 //   - *ClaudeTokenData: The refreshed token data
 //   - error: An error if all retry attempts fail
 func (o *ClaudeAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, maxRetries int) (*ClaudeTokenData, error) {
-	var lastErr error
-
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		if attempt > 0 {
-			// Wait before retry
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(time.Duration(attempt) * time.Second):
-			}
-		}
-
-		tokenData, err := o.RefreshTokens(ctx, refreshToken)
-		if err == nil {
-			return tokenData, nil
-		}
-
-		lastErr = err
-		log.Warnf("Token refresh attempt %d failed: %v", attempt+1, err)
-	}
-
-	return nil, fmt.Errorf("token refresh failed after %d attempts: %w", maxRetries, lastErr)
+	return util.WithRetry(ctx, maxRetries, "Token refresh", func(ctx context.Context) (*ClaudeTokenData, error) {
+		return o.RefreshTokens(ctx, refreshToken)
+	})
 }
 
 // UpdateTokenStorage updates an existing token storage with new token data.
