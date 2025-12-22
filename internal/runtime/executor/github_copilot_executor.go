@@ -15,7 +15,6 @@ import (
 	"github.com/nghyane/llm-mux/internal/config"
 	cliproxyauth "github.com/nghyane/llm-mux/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/nghyane/llm-mux/sdk/cliproxy/executor"
-	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/sjson"
 	"golang.org/x/sync/singleflight"
 )
@@ -93,10 +92,8 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	defer func() { _ = httpResp.Body.Close() }()
 
 	if !isHTTPSuccessCode(httpResp.StatusCode) {
-		data, _ := io.ReadAll(httpResp.Body)
-		log.Debugf("github-copilot executor: upstream error status: %d, body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = newCategorizedError(httpResp.StatusCode, string(data), nil)
-		return resp, err
+		result := HandleHTTPError(httpResp, "github-copilot executor")
+		return resp, result.Error
 	}
 
 	data, err := io.ReadAll(httpResp.Body)
@@ -155,11 +152,8 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 	}
 
 	if !isHTTPSuccessCode(httpResp.StatusCode) {
-		data, _ := io.ReadAll(httpResp.Body)
-		_ = httpResp.Body.Close()
-		log.Debugf("github-copilot executor: upstream error status: %d, body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = newCategorizedError(httpResp.StatusCode, string(data), nil)
-		return nil, err
+		result := HandleHTTPError(httpResp, "github-copilot executor")
+		return nil, result.Error
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
