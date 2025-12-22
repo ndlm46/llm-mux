@@ -145,17 +145,12 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context
 		}
 	}()
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(b)}
+		result := HandleHTTPError(httpResp, "gemini-vertex executor")
+		return cliproxyexecutor.Response{}, result.Error
 	}
 	data, errRead := io.ReadAll(httpResp.Body)
 	if errRead != nil {
 		return cliproxyexecutor.Response{}, errRead
-	}
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(data)}
 	}
 	count := gjson.GetBytes(data, "totalTokens").Int()
 	to := formatGemini
@@ -204,17 +199,12 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(ctx context.Context, auth *
 		}
 	}()
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(b)}
+		result := HandleHTTPError(httpResp, "gemini-vertex executor")
+		return cliproxyexecutor.Response{}, result.Error
 	}
 	data, errRead := io.ReadAll(httpResp.Body)
 	if errRead != nil {
 		return cliproxyexecutor.Response{}, errRead
-	}
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(data)}
 	}
 	count := gjson.GetBytes(data, "totalTokens").Int()
 	to := formatGemini
@@ -247,12 +237,11 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 			action = "countTokens"
 		}
 	}
-	baseURL := vertexBaseURL(location)
-	url := fmt.Sprintf("%s/%s/projects/%s/locations/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, projectID, location, req.Model, action)
+
+	url := fmt.Sprintf("https://%s-aiplatform.googleapis.com/%s/projects/%s/locations/%s/publishers/google/models/%s:%s", location, vertexAPIVersion, projectID, location, req.Model, action)
 	if opts.Alt != "" && action != "countTokens" {
 		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
 	}
-	body, _ = sjson.DeleteBytes(body, "session_id")
 
 	httpReq, errNewReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errNewReq != nil {
@@ -278,10 +267,8 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		}
 	}()
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return resp, err
+		result := HandleHTTPError(httpResp, "gemini-vertex executor")
+		return resp, result.Error
 	}
 	data, errRead := io.ReadAll(httpResp.Body)
 	if errRead != nil {
@@ -352,10 +339,8 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 		}
 	}()
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
-		return resp, err
+		result := HandleHTTPError(httpResp, "gemini-vertex executor")
+		return resp, result.Error
 	}
 	data, errRead := io.ReadAll(httpResp.Body)
 	if errRead != nil {
@@ -417,12 +402,8 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		return nil, errDo
 	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("vertex executor: close response body error: %v", errClose)
-		}
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(b)}
+		result := HandleHTTPError(httpResp, "gemini-vertex executor")
+		return nil, result.Error
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -518,12 +499,8 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		return nil, errDo
 	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
-		log.Debugf("request error, error status: %d, error body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("vertex executor: close response body error: %v", errClose)
-		}
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(b)}
+		result := HandleHTTPError(httpResp, "gemini-vertex executor")
+		return nil, result.Error
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
