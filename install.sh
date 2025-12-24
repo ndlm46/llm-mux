@@ -189,7 +189,12 @@ verify_checksum() {
         return 0
     fi
 
-    if [[ "${expected,,}" != "${actual,,}" ]]; then
+    # Use tr for case-insensitive comparison (bash 3.2 compatible)
+    local expected_lower actual_lower
+    expected_lower=$(echo "$expected" | tr '[:upper:]' '[:lower:]')
+    actual_lower=$(echo "$actual" | tr '[:upper:]' '[:lower:]')
+
+    if [[ "$expected_lower" != "$actual_lower" ]]; then
         error "Checksum verification FAILED for $filename!
     Expected: $expected
     Actual:   $actual
@@ -207,6 +212,7 @@ install_binary() {
 
     old_dir=$(pwd)
     tmp_dir=$(mktemp -d)
+    # shellcheck disable=SC2064
     trap "cd '$old_dir'; rm -rf '$tmp_dir'" EXIT
 
     version_num="${VERSION#v}"
@@ -589,6 +595,8 @@ print_success() {
 
         local shell_name shell_rc
         shell_name=$(basename "${SHELL:-/bin/bash}")
+        # Using ~ for display purposes (shown to user as instructions)
+        # shellcheck disable=SC2088
         case "$shell_name" in
             zsh)  shell_rc="~/.zshrc" ;;
             fish) shell_rc="~/.config/fish/config.fish" ;;
