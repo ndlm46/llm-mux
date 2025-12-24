@@ -93,9 +93,6 @@ func ExtractCreds(a *auth.Auth, cfg CredExtractorConfig) (token, url string) {
 	return token, url
 }
 
-// Predefined configurations for each provider.
-// These encapsulate the specific credential extraction logic for each provider.
-
 // ExtractRefreshToken extracts refresh token from auth metadata.
 // Returns empty string and false if not found.
 func ExtractRefreshToken(auth *auth.Auth) (string, bool) {

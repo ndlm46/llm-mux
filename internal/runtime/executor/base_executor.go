@@ -28,11 +28,9 @@ import (
 //	    return &MyExecutor{BaseExecutor: BaseExecutor{Cfg: cfg}}
 //	}
 type BaseExecutor struct {
-	// Cfg holds the application configuration.
 	Cfg *config.Config
 }
 
-// Config returns the application configuration.
 func (b *BaseExecutor) Config() *config.Config {
 	return b.Cfg
 }
@@ -58,71 +56,26 @@ func (b *BaseExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) err
 }
 
 // NewHTTPClient creates an HTTP client with proper proxy configuration.
-// It wraps newProxyAwareHTTPClient for convenient access by embedded executors.
-//
-// Parameters:
-//   - ctx: The context containing optional RoundTripper
-//   - auth: The authentication information
-//   - timeout: The client timeout (0 means no timeout)
-//
-// Returns:
-//   - *http.Client: An HTTP client with configured proxy or transport
 func (b *BaseExecutor) NewHTTPClient(ctx context.Context, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	return newProxyAwareHTTPClient(ctx, b.Cfg, auth, timeout)
 }
 
 // NewUsageReporter creates a new usage reporter for tracking API usage.
-// It wraps newUsageReporter for convenient access by embedded executors.
-//
-// Parameters:
-//   - ctx: The request context
-//   - provider: The provider identifier (e.g., "gemini", "claude")
-//   - model: The model being used
-//   - auth: The authentication information
-//
-// Returns:
-//   - *usageReporter: A usage reporter instance
 func (b *BaseExecutor) NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *usageReporter {
 	return newUsageReporter(ctx, provider, model, auth)
 }
 
 // ApplyPayloadConfig applies payload default and override rules from configuration.
-// It wraps applyPayloadConfig for convenient access by embedded executors.
-//
-// Parameters:
-//   - model: The model identifier
-//   - payload: The JSON payload to modify
-//
-// Returns:
-//   - []byte: The modified payload
 func (b *BaseExecutor) ApplyPayloadConfig(model string, payload []byte) []byte {
 	return applyPayloadConfig(b.Cfg, model, payload)
 }
 
-// RefreshNoOp is a default no-op refresh implementation for executors that
-// do not require token refresh (e.g., API key based authentication).
-// It returns the auth unchanged without performing any refresh operation.
-//
-// Parameters:
-//   - ctx: The context (unused)
-//   - auth: The authentication information
-//
-// Returns:
-//   - *cliproxyauth.Auth: The unchanged auth
-//   - error: Always nil
+// RefreshNoOp is a no-op refresh for executors that don't require token refresh.
 func (b *BaseExecutor) RefreshNoOp(_ context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	return auth, nil
 }
 
-// CountTokensNotSupported returns a NotImplemented error for executors
-// that do not support token counting.
-//
-// Parameters:
-//   - provider: The provider identifier for the error message
-//
-// Returns:
-//   - cliproxyexecutor.Response: Empty response
-//   - error: StatusError with http.StatusNotImplemented
+// CountTokensNotSupported returns a NotImplemented error for executors that don't support token counting.
 func (b *BaseExecutor) CountTokensNotSupported(provider string) (cliproxyexecutor.Response, error) {
 	return cliproxyexecutor.Response{}, NewNotImplementedError("count tokens not supported for " + provider)
 }

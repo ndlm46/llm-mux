@@ -51,10 +51,6 @@ const (
 	rateLimitMaxRetries = 1
 )
 
-// =============================================================================
-// New Abstraction Layer - RetryHandler
-// =============================================================================
-
 // RetryConfig defines retry behavior for multi-target execution
 type RetryConfig struct {
 	MaxRetries       int           // Max retries per target (default: 1)
@@ -286,10 +282,6 @@ func (h *RetryHandler) calculateDelayForError() time.Duration {
 	}
 	return delay
 }
-
-// =============================================================================
-// Legacy Implementation (Backward Compatibility)
-// =============================================================================
 
 // rateLimitRetrier handles rate limit (429) errors with exponential backoff retry logic.
 type rateLimitRetrier struct {

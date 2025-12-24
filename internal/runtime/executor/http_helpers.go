@@ -19,8 +19,6 @@ type compositeReadCloser struct {
 	closers []func() error
 }
 
-// Close closes all underlying resources in order.
-// Returns the first error encountered, if any.
 func (c *compositeReadCloser) Close() error {
 	var firstErr error
 	for i := range c.closers {

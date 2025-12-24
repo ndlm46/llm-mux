@@ -87,7 +87,6 @@ type StatusError struct {
 	category   cliproxyauth.ErrorCategory
 }
 
-// Error implements the error interface.
 func (e StatusError) Error() string {
 	if e.msg != "" {
 		return e.msg
@@ -95,13 +94,10 @@ func (e StatusError) Error() string {
 	return fmt.Sprintf("status %d", e.code)
 }
 
-// StatusCode returns the HTTP status code.
 func (e StatusError) StatusCode() int { return e.code }
 
-// RetryAfter returns the optional retry-after duration.
 func (e StatusError) RetryAfter() *time.Duration { return e.retryAfter }
 
-// Category returns the error category for classification.
 func (e StatusError) Category() cliproxyauth.ErrorCategory { return e.category }
 
 // Unwrap returns nil as StatusError doesn't wrap another error.

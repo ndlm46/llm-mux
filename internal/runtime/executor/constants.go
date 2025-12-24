@@ -4,17 +4,9 @@ package executor
 
 import "time"
 
-// =============================================================================
-// Stream Buffer Size
-// =============================================================================
-
 // DefaultStreamBufferSize is 20MB - maximum buffer for SSE stream scanning.
 // This size accommodates large tool call responses from LLM providers.
 const DefaultStreamBufferSize = 20 * 1024 * 1024
-
-// =============================================================================
-// User Agent Strings
-// =============================================================================
 
 const (
 	// DefaultClaudeUserAgent is the User-Agent header for Claude CLI requests.
@@ -35,10 +27,6 @@ const (
 	// DefaultCopilotUserAgent is the User-Agent header for GitHub Copilot requests.
 	DefaultCopilotUserAgent = "GithubCopilot/1.0"
 )
-
-// =============================================================================
-// Default Base URLs
-// =============================================================================
 
 const (
 	// ClaudeDefaultBaseURL is the default API endpoint for Anthropic Claude.
@@ -69,10 +57,6 @@ const (
 	KiroDefaultBaseURL = "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse"
 )
 
-// =============================================================================
-// Timeout Values
-// =============================================================================
-
 const (
 	// DefaultHTTPTimeout is the default timeout for HTTP requests.
 	// Used as fallback when no specific timeout is configured.
@@ -94,10 +78,6 @@ const (
 	// TokenExpiryBuffer is the buffer time before token expiry for cache invalidation.
 	TokenExpiryBuffer = 5 * time.Minute
 )
-
-// =============================================================================
-// Retry Configuration
-// =============================================================================
 
 const (
 	// RateLimitBaseDelay is the initial delay for rate limit retries.

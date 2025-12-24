@@ -32,10 +32,6 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// =============================================================================
-// Streaming Abstractions
-// =============================================================================
-
 // StreamProcessor defines the interface for processing SSE stream lines.
 // Implementations handle provider-specific parsing and translation logic.
 type StreamProcessor interface {
@@ -91,10 +87,6 @@ type StreamConfig struct {
 	SkipDoneInData bool
 }
 
-// =============================================================================
-// Pre-built Preprocessors
-// =============================================================================
-
 // GeminiPreprocessor creates a preprocessor for Gemini/Antigravity streams.
 // It applies FilterSSEUsageMetadata, extracts JSON payload, and validates JSON.
 func GeminiPreprocessor() StreamPreprocessor {
@@ -147,10 +139,6 @@ func DataTagPreprocessor() StreamPreprocessor {
 	}
 }
 
-// =============================================================================
-// Helper Functions
-// =============================================================================
-
 // sendChunk sends a chunk to the output channel with context cancellation support.
 // Returns true if the chunk was sent, false if context was cancelled.
 func sendChunk(ctx context.Context, out chan<- cliproxyexecutor.StreamChunk, chunk cliproxyexecutor.StreamChunk) bool {
@@ -175,12 +163,6 @@ func isDoneLine(line []byte) bool {
 	}
 	return false
 }
-
-// Note: dataTag is defined in codex_executor.go as var dataTag = []byte("data:")
-
-// =============================================================================
-// Main Streaming Function
-// =============================================================================
 
 // RunSSEStream processes an SSE stream from the given body using the provided processor.
 // It handles buffering, context cancellation, error reporting, and usage tracking.
@@ -322,10 +304,6 @@ func RunSSEStream(
 	return out
 }
 
-// =============================================================================
-// Convenience Types for Common Processor Patterns
-// =============================================================================
-
 // SimpleStreamProcessor is a convenience wrapper for simple processing functions.
 // It implements StreamProcessor for cases where ProcessDone is not needed.
 type SimpleStreamProcessor struct {
@@ -333,7 +311,6 @@ type SimpleStreamProcessor struct {
 	ProcessFunc func(line []byte) (chunks [][]byte, usage *ir.Usage, err error)
 }
 
-// ProcessLine implements StreamProcessor.ProcessLine.
 func (p *SimpleStreamProcessor) ProcessLine(line []byte) ([][]byte, *ir.Usage, error) {
 	if p.ProcessFunc == nil {
 		return nil, nil, nil
@@ -341,7 +318,6 @@ func (p *SimpleStreamProcessor) ProcessLine(line []byte) ([][]byte, *ir.Usage, e
 	return p.ProcessFunc(line)
 }
 
-// ProcessDone implements StreamProcessor.ProcessDone (no-op for simple processors).
 func (p *SimpleStreamProcessor) ProcessDone() ([][]byte, error) {
 	return nil, nil
 }
