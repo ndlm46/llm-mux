@@ -1,81 +1,68 @@
 ---
 name: llm-mux-test
-description: Test llm-mux API endpoints (OpenAI/Claude/Gemini) with chat, stream, and tool calling
+description: Test llm-mux IR translator - cross-format API translation
 ---
 
-## 1. Setup
+## Quick Check
 
 ```bash
-PORT=$(grep -E "^port:" ~/.config/llm-mux/config.yaml | awk '{print $2}')
-[ -z "$PORT" ] && echo "Error: PORT not found in config" && exit 1
-curl -sf "http://localhost:$PORT/" > /dev/null || echo "Warning: Service not running. Use build-deploy skill."
+PORT=8318; curl -s http://localhost:$PORT/v1/models | jq -r '.data[:3][].id'
 ```
 
-> If service needs restart, use the `build-deploy` skill.
+## Translation Matrix Tests
 
-## 2. List Models
-
-```bash
-curl -s http://localhost:$PORT/v1/models | jq -r '.data[].id'
-```
-
-## 3. Cross-Format Testing
-
-Test translation giữa các API format và backend model.
+Test các luồng translation thực tế trong hệ thống.
 
 ### OpenAI Format -> Gemini Backend
 
 ```bash
+PORT=8318
 # Chat
-curl -s http://localhost:$PORT/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "gemini-2.5-flash", "messages": [{"role": "user", "content": "Say hi"}]}'
+curl -s http://localhost:$PORT/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"Hi"}]}' | jq -r '.choices[0].message.content'
 
-# Stream
-curl -s http://localhost:$PORT/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "gemini-2.5-flash", "messages": [{"role": "user", "content": "Say hi"}], "stream": true}'
-
-# Tool Calling
-curl -s http://localhost:$PORT/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "gemini-2.5-flash", "messages": [{"role": "user", "content": "Weather in Tokyo?"}], "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]}}}]}'
+# Tool Call
+curl -s http://localhost:$PORT/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"Weather Tokyo?"}],"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{"location":{"type":"string"}}}}}]}' | jq '.choices[0].message.tool_calls[0].function'
 ```
 
 ### Claude Format -> Gemini Backend
 
 ```bash
-# Chat
-curl -s http://localhost:$PORT/v1/messages \
-  -H "Content-Type: application/json" -H "anthropic-version: 2023-06-01" \
-  -d '{"model": "gemini-2.5-flash", "max_tokens": 100, "messages": [{"role": "user", "content": "Say hi"}]}'
-
-# Stream
-curl -s http://localhost:$PORT/v1/messages \
-  -H "Content-Type: application/json" -H "anthropic-version: 2023-06-01" \
-  -d '{"model": "gemini-2.5-flash", "max_tokens": 100, "messages": [{"role": "user", "content": "Say hi"}], "stream": true}'
-
-# Tool Calling
-curl -s http://localhost:$PORT/v1/messages \
-  -H "Content-Type: application/json" -H "anthropic-version: 2023-06-01" \
-  -d '{"model": "gemini-2.5-flash", "max_tokens": 100, "messages": [{"role": "user", "content": "Weather in Tokyo?"}], "tools": [{"name": "get_weather", "input_schema": {"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]}}]}'
+PORT=8318
+# Note: Response may have thinking block first, so find text block
+curl -s http://localhost:$PORT/v1/messages -H "Content-Type: application/json" -H "anthropic-version: 2023-06-01" \
+  -d '{"model":"gemini-2.5-flash","max_tokens":50,"messages":[{"role":"user","content":"Hi"}]}' | jq -r '.content[] | select(.type=="text") | .text'
 ```
 
-### Gemini Format -> GPT Backend
+### Gemini Format -> Codex/GPT Backend
 
 ```bash
-# Chat
-curl -s "http://localhost:$PORT/v1beta/models/gpt-5:generateContent" \
-  -H "Content-Type: application/json" \
-  -d '{"contents": [{"role": "user", "parts": [{"text": "Say hi"}]}]}'
+PORT=8318
+curl -s "http://localhost:$PORT/v1beta/models/gpt-5:generateContent" -H "Content-Type: application/json" \
+  -d '{"contents":[{"role":"user","parts":[{"text":"Hi"}]}]}' | jq -r '.candidates[0].content.parts[0].text'
+```
 
-# Stream
-curl -s "http://localhost:$PORT/v1beta/models/gpt-5:streamGenerateContent?alt=sse" \
-  -H "Content-Type: application/json" \
-  -d '{"contents": [{"role": "user", "parts": [{"text": "Say hi"}]}]}'
+### OpenAI Format -> Claude Backend
 
-# Tool Calling
-curl -s "http://localhost:$PORT/v1beta/models/gpt-5:generateContent" \
-  -H "Content-Type: application/json" \
-  -d '{"contents": [{"role": "user", "parts": [{"text": "Weather in Tokyo?"}]}], "tools": [{"function_declarations": [{"name": "get_weather", "parameters": {"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]}}]}]}'
+```bash
+PORT=8318
+curl -s http://localhost:$PORT/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"model":"claude-sonnet-4","messages":[{"role":"user","content":"Hi"}]}' | jq -r '.choices[0].message.content'
+```
+
+## Streaming Test
+
+```bash
+PORT=8318
+curl -s http://localhost:$PORT/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"Hi"}],"stream":true}' | head -3
+```
+
+## Thinking/Reasoning Test
+
+```bash
+PORT=8318
+curl -s http://localhost:$PORT/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"2+2=?"}],"reasoning_effort":"low"}' | jq '.choices[0].message | {content, reasoning: .reasoning_content[:100]}'
 ```
