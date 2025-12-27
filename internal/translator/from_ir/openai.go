@@ -104,7 +104,7 @@ func convertToChatCompletionsRequest(req *ir.UnifiedChatRequest) ([]byte, error)
 	}
 
 	// Build tools array (function tools + built-in tools from metadata)
-	var tools []any
+	tools := make([]any, 0, len(req.Tools))
 	for _, t := range req.Tools {
 		params := t.Parameters
 		if params == nil {
@@ -544,7 +544,7 @@ func ToOpenAIChatCompletionCandidates(candidates []ir.CandidateResult, usage *ir
 		response["service_tier"] = meta.ServiceTier
 	}
 
-	var choices []any
+	choices := make([]any, 0, len(candidates))
 	for _, candidate := range candidates {
 		if len(candidate.Messages) == 0 {
 			continue

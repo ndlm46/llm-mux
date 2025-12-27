@@ -62,10 +62,10 @@ func LoadRecordsFromDB(db *sql.DB, retentionDays int, stats *RequestStatistics) 
 	defer stats.mu.Unlock()
 
 	// Apply global stats
-	stats.totalRequests = globalAgg.totalRequests
-	stats.successCount = globalAgg.successCount
-	stats.failureCount = globalAgg.failureCount
-	stats.totalTokens = globalAgg.totalTokens
+	stats.totalRequests.Store(globalAgg.totalRequests)
+	stats.successCount.Store(globalAgg.successCount)
+	stats.failureCount.Store(globalAgg.failureCount)
+	stats.totalTokens.Store(globalAgg.totalTokens)
 
 	// Apply daily aggregates
 	for _, d := range dailyAggs {

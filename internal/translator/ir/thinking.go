@@ -2,6 +2,13 @@ package ir
 
 import "strings"
 
+// NormalizeModel converts model name to lowercase for consistent processing.
+// Callers should use this to normalize model strings once before passing
+// to functions that perform case-insensitive checks.
+func NormalizeModel(model string) string {
+	return strings.ToLower(model)
+}
+
 func IsGemini3(model string) bool {
 	return strings.HasPrefix(strings.ToLower(model), "gemini-3")
 }

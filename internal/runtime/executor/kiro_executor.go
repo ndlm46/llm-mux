@@ -264,7 +264,7 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *coreauth.Auth, r
 		return nil, fmt.Errorf("upstream error %d: %s", resp.StatusCode, string(body))
 	}
 
-	out := make(chan cliproxyexecutor.StreamChunk)
+	out := make(chan cliproxyexecutor.StreamChunk, 8)
 	go e.processStream(ctx, resp, req.Model, out)
 	return out, nil
 }

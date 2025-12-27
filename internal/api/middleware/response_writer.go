@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/nghyane/llm-mux/internal/interfaces"
 	"github.com/nghyane/llm-mux/internal/logging"
+	"github.com/nghyane/llm-mux/internal/translator/ir"
 )
 
 // RequestInfo holds essential details of an incoming HTTP request for logging purposes.
@@ -48,7 +49,7 @@ type ResponseWriterWrapper struct {
 func NewResponseWriterWrapper(w gin.ResponseWriter, logger logging.RequestLogger, requestInfo *RequestInfo) *ResponseWriterWrapper {
 	return &ResponseWriterWrapper{
 		ResponseWriter: w,
-		body:           &bytes.Buffer{},
+		body:           ir.GetBuffer(),
 		logger:         logger,
 		requestInfo:    requestInfo,
 		headers:        make(map[string][]string),
@@ -243,7 +244,9 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		return nil
 	}
 
-	return w.logRequest(finalStatusCode, w.cloneHeaders(), w.body.Bytes(), w.extractAPIRequest(c), w.extractAPIResponse(c), slicesAPIResponseError, forceLog)
+	err := w.logRequest(finalStatusCode, w.cloneHeaders(), w.body.Bytes(), w.extractAPIRequest(c), w.extractAPIResponse(c), slicesAPIResponseError, forceLog)
+	ir.PutBuffer(w.body)
+	return err
 }
 
 func (w *ResponseWriterWrapper) cloneHeaders() map[string][]string {

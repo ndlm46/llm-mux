@@ -206,7 +206,7 @@ func RunSSEStream(
 	processor StreamProcessor,
 	cfg StreamConfig,
 ) <-chan cliproxyexecutor.StreamChunk {
-	out := make(chan cliproxyexecutor.StreamChunk)
+	out := make(chan cliproxyexecutor.StreamChunk, 8)
 
 	go func() {
 		defer close(out)

@@ -137,7 +137,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		}
 		return nil, NewStatusError(firstEvent.Status, body.String(), nil)
 	}
-	out := make(chan cliproxyexecutor.StreamChunk)
+	out := make(chan cliproxyexecutor.StreamChunk, 8)
 	stream = out
 
 	go func(first wsrelay.StreamEvent, inputTokens int64) {

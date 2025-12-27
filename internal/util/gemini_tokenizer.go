@@ -58,6 +58,8 @@ func CountTokensFromIR(model string, req *ir.UnifiedChatRequest) int64 {
 		return 0
 	}
 
+	model = strings.ToLower(model)
+
 	// Dispatch to appropriate tokenizer
 	if isGeminiModel(model) {
 		return countGeminiTokens(model, req)
@@ -170,32 +172,33 @@ func getTokenizer(model string) (*tokenizer.LocalTokenizer, error) {
 //   - gemini-1.0-pro, gemini-1.5-pro, gemini-1.5-flash → gemma2 tokenizer
 //   - gemini-2.0-flash, gemini-2.0-flash-lite → gemma3 tokenizer
 //   - gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-lite → gemma3 tokenizer
+//
+// Assumes model is already lowercase.
 func normalizeModel(model string) string {
-	lower := strings.ToLower(model)
 	switch {
 	// Gemini 2.5 series - use gemini-2.5-flash (officially supported)
-	case strings.Contains(lower, "gemini-2.5-flash-lite"):
+	case strings.Contains(model, "gemini-2.5-flash-lite"):
 		return "gemini-2.5-flash-lite"
-	case strings.Contains(lower, "gemini-2.5-flash"):
+	case strings.Contains(model, "gemini-2.5-flash"):
 		return "gemini-2.5-flash"
-	case strings.Contains(lower, "gemini-2.5-pro"):
+	case strings.Contains(model, "gemini-2.5-pro"):
 		return "gemini-2.5-pro"
 	// Gemini 3 series - fallback to gemini-2.5-flash (same gemma3 tokenizer)
-	case strings.Contains(lower, "gemini-3"):
+	case strings.Contains(model, "gemini-3"):
 		return "gemini-2.5-flash"
 	// Gemini 2.0 series
-	case strings.Contains(lower, "gemini-2.0-flash-lite"):
+	case strings.Contains(model, "gemini-2.0-flash-lite"):
 		return "gemini-2.0-flash-lite"
-	case strings.Contains(lower, "gemini-2.0"):
+	case strings.Contains(model, "gemini-2.0"):
 		return "gemini-2.0-flash"
 	// Gemini 1.5 series
-	case strings.Contains(lower, "gemini-1.5-pro"):
+	case strings.Contains(model, "gemini-1.5-pro"):
 		return "gemini-1.5-pro"
-	case strings.Contains(lower, "gemini-1.5"):
+	case strings.Contains(model, "gemini-1.5"):
 		return "gemini-1.5-flash"
 	// Gemini 1.0 series
-	case strings.Contains(lower, "gemini-1.0"),
-		strings.Contains(lower, "gemini-pro"):
+	case strings.Contains(model, "gemini-1.0"),
+		strings.Contains(model, "gemini-pro"):
 		return "gemini-1.0-pro"
 	// Default to gemini-2.5-flash for unknown models (most current)
 	default:
@@ -211,9 +214,8 @@ func normalizeModel(model string) string {
 //
 // This ensures models proxied through Gemini infrastructure but using different
 // tokenizers are handled correctly.
+// Assumes model is already lowercase.
 func isGeminiModel(model string) bool {
-	lower := strings.ToLower(model)
-
 	// Non-Gemini models that should use tiktoken
 	nonGeminiPatterns := []string{
 		"claude",    // Claude models (even gemini-claude-*)
@@ -227,13 +229,13 @@ func isGeminiModel(model string) bool {
 	}
 
 	for _, pattern := range nonGeminiPatterns {
-		if strings.Contains(lower, pattern) {
+		if strings.Contains(model, pattern) {
 			return false
 		}
 	}
 
 	// Must contain "gemini" to be considered a Gemini model
-	return strings.Contains(lower, "gemini")
+	return strings.Contains(model, "gemini")
 }
 
 // buildContentsFromIR converts IR messages to genai.Content slice for token counting.

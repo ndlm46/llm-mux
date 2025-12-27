@@ -165,7 +165,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		_ = httpResp.Body.Close()
 		return nil, result.Error
 	}
-	out := make(chan cliproxyexecutor.StreamChunk)
+	out := make(chan cliproxyexecutor.StreamChunk, 8)
 	stream = out
 	go func() {
 		defer close(out)
@@ -175,7 +175,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 		}()
 		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(make([]byte, 64*1024), DefaultStreamBufferSize)
+		buf := scannerBufferPool.Get().([]byte)
+		defer scannerBufferPool.Put(buf)
+		scanner.Buffer(buf, DefaultStreamBufferSize)
 		streamState := &OpenAIStreamState{}
 		messageID := "chatcmpl-" + req.Model
 		for scanner.Scan() {

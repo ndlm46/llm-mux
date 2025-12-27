@@ -157,7 +157,7 @@ func CombineReasoningParts(msg Message) string {
 
 // BuildToolCallMap creates a map of tool call ID to function name.
 func BuildToolCallMap(messages []Message) map[string]string {
-	m := make(map[string]string)
+	m := make(map[string]string, 8)
 	for _, msg := range messages {
 		if msg.Role == RoleAssistant {
 			for _, tc := range msg.ToolCalls {
@@ -170,7 +170,7 @@ func BuildToolCallMap(messages []Message) map[string]string {
 
 // BuildToolResultsMap creates a map of tool call ID to result part.
 func BuildToolResultsMap(messages []Message) map[string]*ToolResultPart {
-	m := make(map[string]*ToolResultPart)
+	m := make(map[string]*ToolResultPart, 8)
 	for _, msg := range messages {
 		// Check RoleTool (OpenAI format) and RoleUser (Claude format has tool_result in user messages)
 		if msg.Role == RoleTool || msg.Role == RoleUser {
@@ -187,12 +187,12 @@ func BuildToolResultsMap(messages []Message) map[string]*ToolResultPart {
 // BuildToolMaps creates both tool call ID→name map and tool results map in a single pass.
 // Handles legacy format where client doesn't provide IDs (ID is empty or equals Name).
 func BuildToolMaps(messages []Message) (map[string]string, map[string]*ToolResultPart) {
-	idToName := make(map[string]string)
-	results := make(map[string]*ToolResultPart)
+	idToName := make(map[string]string, 8)
+	results := make(map[string]*ToolResultPart, 8)
 
 	// For legacy format (no IDs), we need FIFO matching by name
 	// Track: name → queue of generated IDs
-	nameToIDs := make(map[string][]string)
+	nameToIDs := make(map[string][]string, 8)
 
 	for _, msg := range messages {
 		switch msg.Role {
@@ -457,7 +457,7 @@ func tryParseNumber(s string) (any, bool) {
 
 // ParseOpenAIStyleToolCalls parses tool_calls array in OpenAI/Ollama format.
 func ParseOpenAIStyleToolCalls(toolCalls []gjson.Result) []ToolCall {
-	var result []ToolCall
+	result := make([]ToolCall, 0, len(toolCalls))
 	for _, tc := range toolCalls {
 		if tc.Get("type").String() == "function" {
 			result = append(result, ToolCall{

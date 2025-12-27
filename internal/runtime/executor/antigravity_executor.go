@@ -754,36 +754,74 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 // =============================================================================
 
 func geminiToAntigravity(modelName string, payload []byte, projectID string) []byte {
-	// Use sjson.SetBytes chain to avoid string conversions (performance optimization)
-	result := payload
-	result, _ = sjson.SetBytes(result, "model", modelName)
-	result, _ = sjson.SetBytes(result, "userAgent", "antigravity")
-
-	if projectID != "" {
-		result, _ = sjson.SetBytes(result, "project", projectID)
-	} else {
-		result, _ = sjson.SetBytes(result, "project", generateProjectID())
+	var data map[string]interface{}
+	if err := json.Unmarshal(payload, &data); err != nil {
+		// If unmarshal fails, return original payload
+		return payload
 	}
-	result, _ = sjson.SetBytes(result, "requestId", generateRequestID())
-	result, _ = sjson.SetBytes(result, "request.sessionId", generateSessionID())
 
-	result, _ = sjson.DeleteBytes(result, "request.safetySettings")
-	result, _ = sjson.SetBytes(result, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
+	// Set top-level fields
+	data["model"] = modelName
+	data["userAgent"] = "antigravity"
+	if projectID != "" {
+		data["project"] = projectID
+	} else {
+		data["project"] = generateProjectID()
+	}
+	data["requestId"] = generateRequestID()
+
+	// Modify request object
+	if req, ok := data["request"].(map[string]interface{}); ok {
+		req["sessionId"] = generateSessionID()
+		delete(req, "safetySettings")
+
+		// Set toolConfig
+		if toolConfig, ok := req["toolConfig"].(map[string]interface{}); ok {
+			if funcCallingConfig, ok := toolConfig["functionCallingConfig"].(map[string]interface{}); ok {
+				funcCallingConfig["mode"] = "VALIDATED"
+			} else {
+				toolConfig["functionCallingConfig"] = map[string]interface{}{"mode": "VALIDATED"}
+			}
+		} else {
+			req["toolConfig"] = map[string]interface{}{
+				"functionCallingConfig": map[string]interface{}{"mode": "VALIDATED"},
+			}
+		}
+
+		if strings.Contains(modelName, "claude") {
+			// Handle tools modification
+			if tools, ok := req["tools"].([]interface{}); ok {
+				for _, tool := range tools {
+					if toolMap, ok := tool.(map[string]interface{}); ok {
+						if funcDecls, ok := toolMap["functionDeclarations"].([]interface{}); ok {
+							for _, funcDecl := range funcDecls {
+								if funcDeclMap, ok := funcDecl.(map[string]interface{}); ok {
+									if paramsSchema, exists := funcDeclMap["parametersJsonSchema"]; exists {
+										funcDeclMap["parameters"] = paramsSchema
+										delete(funcDeclMap, "parametersJsonSchema")
+										// Delete $schema from parameters if it exists
+										if params, ok := funcDeclMap["parameters"].(map[string]interface{}); ok {
+											delete(params, "$schema")
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Marshal the modified data
+	result, err := json.Marshal(data)
+	if err != nil {
+		// If marshal fails, return original payload
+		return payload
+	}
 
 	if strings.Contains(modelName, "claude") {
-		gjson.GetBytes(result, "request.tools").ForEach(func(key, tool gjson.Result) bool {
-			tool.Get("functionDeclarations").ForEach(func(funKey, funcDecl gjson.Result) bool {
-				if funcDecl.Get("parametersJsonSchema").Exists() {
-					result, _ = sjson.SetRawBytes(result, fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parameters", key.Int(), funKey.Int()), []byte(funcDecl.Get("parametersJsonSchema").Raw))
-					result, _ = sjson.DeleteBytes(result, fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parameters.$schema", key.Int(), funKey.Int()))
-					result, _ = sjson.DeleteBytes(result, fmt.Sprintf("request.tools.%d.functionDeclarations.%d.parametersJsonSchema", key.Int(), funKey.Int()))
-				}
-				return true
-			})
-			return true
-		})
-
-		// Batch delete operations using util.DeleteKey (string conversion unavoidable here)
+		// Batch delete operations using util.DeleteKey
 		strJSON := string(result)
 		strJSON = util.DeleteKey(strJSON, "request.tools.#.functionDeclarations.#.parameters.$schema")
 		strJSON = util.DeleteKey(strJSON, "request.tools.#.functionDeclarations.#.parameters.$ref")

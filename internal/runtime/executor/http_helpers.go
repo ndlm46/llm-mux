@@ -67,9 +67,9 @@ func ApplyAPIHeaders(r *http.Request, cfg HeaderConfig, stream bool) {
 // Decompression Pools
 // =============================================================================
 
-// gzipReaderPool reduces allocations for gzip decompression.
+// GzipReaderPool reduces allocations for gzip decompression.
 // gzip.Reader can be reset and reused across requests.
-var gzipReaderPool = sync.Pool{
+var GzipReaderPool = sync.Pool{
 	New: func() any {
 		// Return nil; will be initialized on first use with Reset()
 		return new(gzip.Reader)
@@ -83,6 +83,15 @@ var zstdDecoderPool = sync.Pool{
 		// Create with default options; will be reset on Get
 		decoder, _ := zstd.NewReader(nil)
 		return decoder
+	},
+}
+
+// brotliReaderPool reduces allocations for brotli decompression.
+// brotli.Reader can be reset and reused across requests.
+var brotliReaderPool = sync.Pool{
+	New: func() any {
+		// Return nil; will be initialized on first use with Reset()
+		return new(brotli.Reader)
 	},
 }
 
@@ -120,7 +129,7 @@ func (p *pooledGzipReadCloser) Read(b []byte) (int, error) {
 func (p *pooledGzipReadCloser) Close() error {
 	// Close the gzip reader and return it to the pool
 	err := p.gr.Close()
-	gzipReaderPool.Put(p.gr)
+	GzipReaderPool.Put(p.gr)
 	// Close the underlying body
 	if bodyErr := p.body.Close(); bodyErr != nil && err == nil {
 		err = bodyErr
@@ -146,6 +155,24 @@ func (p *pooledZstdReadCloser) Close() error {
 	return p.body.Close()
 }
 
+// pooledBrotliReadCloser wraps a pooled brotli.Reader with proper cleanup.
+type pooledBrotliReadCloser struct {
+	br   *brotli.Reader
+	body io.ReadCloser
+}
+
+func (p *pooledBrotliReadCloser) Read(b []byte) (int, error) {
+	return p.br.Read(b)
+}
+
+func (p *pooledBrotliReadCloser) Close() error {
+	// Discard remaining data to allow reuse, then return to pool
+	io.Copy(io.Discard, p.br)
+	brotliReaderPool.Put(p.br)
+	// Close the underlying body
+	return p.body.Close()
+}
+
 // decodeResponseBody wraps the response body with the appropriate decompression reader
 // based on the Content-Encoding header. Supports gzip, deflate, br (brotli), and zstd.
 // Returns the original body if no encoding is specified or if encoding is "identity".
@@ -165,9 +192,9 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 			continue
 		case "gzip":
 			// Get pooled gzip reader
-			gr := gzipReaderPool.Get().(*gzip.Reader)
+			gr := GzipReaderPool.Get().(*gzip.Reader)
 			if err := gr.Reset(body); err != nil {
-				gzipReaderPool.Put(gr)
+				GzipReaderPool.Put(gr)
 				_ = body.Close()
 				return nil, fmt.Errorf("failed to reset gzip reader: %w", err)
 			}
@@ -182,12 +209,14 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 				},
 			}, nil
 		case "br":
-			return &compositeReadCloser{
-				Reader: brotli.NewReader(body),
-				closers: []func() error{
-					func() error { return body.Close() },
-				},
-			}, nil
+			// Get pooled brotli reader
+			br := brotliReaderPool.Get().(*brotli.Reader)
+			if err := br.Reset(body); err != nil {
+				brotliReaderPool.Put(br)
+				_ = body.Close()
+				return nil, fmt.Errorf("failed to reset brotli reader: %w", err)
+			}
+			return &pooledBrotliReadCloser{br: br, body: body}, nil
 		case "zstd":
 			// Get pooled zstd decoder
 			decoder := zstdDecoderPool.Get().(*zstd.Decoder)

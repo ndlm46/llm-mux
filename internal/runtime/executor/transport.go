@@ -41,6 +41,7 @@ var SharedTransport = &http.Transport{
 	IdleConnTimeout:       TransportConfig.IdleConnTimeout,
 	TLSHandshakeTimeout:   TransportConfig.TLSHandshakeTimeout,
 	ExpectContinueTimeout: TransportConfig.ExpectContinueTimeout,
+	ResponseHeaderTimeout: 60 * time.Second,
 	ForceAttemptHTTP2:     true,
 	DisableCompression:    false,
 	DialContext: (&net.Dialer{
@@ -62,6 +63,7 @@ func ProxyTransport(proxyURL *url.URL) *http.Transport {
 		IdleConnTimeout:       TransportConfig.IdleConnTimeout,
 		TLSHandshakeTimeout:   TransportConfig.TLSHandshakeTimeout,
 		ExpectContinueTimeout: TransportConfig.ExpectContinueTimeout,
+		ResponseHeaderTimeout: 60 * time.Second,
 		ForceAttemptHTTP2:     true,
 		DisableCompression:    false,
 		TLSClientConfig: &tls.Config{
@@ -82,6 +84,7 @@ func SOCKS5Transport(dialFunc func(network, addr string) (net.Conn, error)) *htt
 		IdleConnTimeout:       TransportConfig.IdleConnTimeout,
 		TLSHandshakeTimeout:   TransportConfig.TLSHandshakeTimeout,
 		ExpectContinueTimeout: TransportConfig.ExpectContinueTimeout,
+		ResponseHeaderTimeout: 60 * time.Second,
 		ForceAttemptHTTP2:     true,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,

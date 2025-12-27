@@ -70,10 +70,8 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 
 	// Update client maps
 	if rescanAuth {
-		w.clientsMutex.Lock()
-
-		// Rebuild auth file hash cache for current clients
-		w.lastAuthHashes = make(map[string]string)
+		// Build hash map WITHOUT holding lock (do all file I/O first)
+		newAuthHashes := make(map[string]string)
 		if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir); errResolveAuthDir != nil {
 			log.Errorf("failed to resolve auth directory for hash cache: %v", errResolveAuthDir)
 		} else if resolvedAuthDir != "" {
@@ -84,12 +82,16 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 				if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".json") {
 					if data, errReadFile := os.ReadFile(path); errReadFile == nil && len(data) > 0 {
 						sum := sha256.Sum256(data)
-						w.lastAuthHashes[path] = hex.EncodeToString(sum[:])
+						newAuthHashes[path] = hex.EncodeToString(sum[:])
 					}
 				}
 				return nil
 			})
 		}
+
+		// Take lock only to swap/update the map atomically
+		w.clientsMutex.Lock()
+		w.lastAuthHashes = newAuthHashes
 		w.clientsMutex.Unlock()
 	}
 

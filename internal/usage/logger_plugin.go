@@ -139,10 +139,10 @@ func StopPersistence() error {
 type RequestStatistics struct {
 	mu sync.RWMutex
 
-	totalRequests int64
-	successCount  int64
-	failureCount  int64
-	totalTokens   int64
+	totalRequests atomic.Int64
+	successCount  atomic.Int64
+	failureCount  atomic.Int64
+	totalTokens   atomic.Int64
 
 	apis map[string]*apiStats
 
@@ -275,16 +275,18 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	dayKey := timestamp.Format("2006-01-02")
 	hourKey := timestamp.Hour()
 
+	// Update atomic counters without lock
+	s.totalRequests.Add(1)
+	if success {
+		s.successCount.Add(1)
+	} else {
+		s.failureCount.Add(1)
+	}
+	s.totalTokens.Add(totalTokens)
+
+	// Lock only for map operations
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	s.totalRequests++
-	if success {
-		s.successCount++
-	} else {
-		s.failureCount++
-	}
-	s.totalTokens += totalTokens
 
 	stats, ok := s.apis[statsKey]
 	if !ok {
@@ -357,13 +359,14 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 		return result
 	}
 
+	// Read atomic counters without lock
+	result.TotalRequests = s.totalRequests.Load()
+	result.SuccessCount = s.successCount.Load()
+	result.FailureCount = s.failureCount.Load()
+	result.TotalTokens = s.totalTokens.Load()
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	result.TotalRequests = s.totalRequests
-	result.SuccessCount = s.successCount
-	result.FailureCount = s.failureCount
-	result.TotalTokens = s.totalTokens
 
 	result.APIs = make(map[string]APISnapshot, len(s.apis))
 	for apiName, stats := range s.apis {

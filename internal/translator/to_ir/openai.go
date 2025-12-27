@@ -51,10 +51,13 @@ func ParseOpenAIRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 
 	if v := root.Get("stop"); v.Exists() {
 		if v.IsArray() {
-			for _, s := range v.Array() {
+			arr := v.Array()
+			req.StopSequences = make([]string, 0, len(arr))
+			for _, s := range arr {
 				req.StopSequences = append(req.StopSequences, s.String())
 			}
 		} else {
+			req.StopSequences = make([]string, 0, 1)
 			req.StopSequences = append(req.StopSequences, v.String())
 		}
 	}
@@ -549,7 +552,7 @@ func ParseOpenAIChunk(rawJSON []byte) ([]ir.UnifiedEvent, error) {
 		return parseResponsesStreamEvent(eventType, root)
 	}
 
-	var events []ir.UnifiedEvent
+	events := make([]ir.UnifiedEvent, 0, 2)
 	choice := root.Get("choices.0")
 	if !choice.Exists() {
 		if u := root.Get("usage"); u.Exists() {
@@ -679,7 +682,7 @@ func ParseOpenAIChunk(rawJSON []byte) ([]ir.UnifiedEvent, error) {
 }
 
 func parseResponsesStreamEvent(eventType string, root gjson.Result) ([]ir.UnifiedEvent, error) {
-	var events []ir.UnifiedEvent
+	events := make([]ir.UnifiedEvent, 0, 2)
 	switch eventType {
 	case "response.output_text.delta":
 		if delta := root.Get("delta"); delta.Exists() && delta.String() != "" {

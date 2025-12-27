@@ -106,7 +106,7 @@ func (p *ClaudeProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, err
 		thinkingEnabled = true
 	}
 
-	var messages []any
+	messages := make([]any, 0, len(req.Messages))
 	for _, msg := range req.Messages {
 		switch msg.Role {
 		case ir.RoleSystem:
@@ -214,7 +214,7 @@ func (p *ClaudeProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, err
 	root["messages"] = messages
 
 	// Build tools array (function tools + built-in tools from metadata)
-	var tools []any
+	tools := make([]any, 0, len(req.Tools))
 	for _, t := range req.Tools {
 		tool := map[string]any{"name": t.Name, "description": t.Description}
 		if len(t.Parameters) > 0 {

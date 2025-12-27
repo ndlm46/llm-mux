@@ -24,6 +24,11 @@ import (
 	"github.com/nghyane/llm-mux/internal/util"
 )
 
+var (
+	sanitizeRegex1 = regexp.MustCompile(`[<>:"|?*\s]`)
+	sanitizeRegex2 = regexp.MustCompile(`-+`)
+)
+
 // RequestLogger defines the interface for logging HTTP requests and responses.
 // It provides methods for logging both regular and streaming HTTP request/response cycles.
 type RequestLogger interface {
@@ -305,12 +310,10 @@ func (l *FileRequestLogger) sanitizeForFilename(path string) string {
 	sanitized = strings.ReplaceAll(sanitized, ":", "-")
 
 	// Replace other problematic characters with hyphens
-	reg := regexp.MustCompile(`[<>:"|?*\s]`)
-	sanitized = reg.ReplaceAllString(sanitized, "-")
+	sanitized = sanitizeRegex1.ReplaceAllString(sanitized, "-")
 
 	// Remove multiple consecutive hyphens
-	reg = regexp.MustCompile(`-+`)
-	sanitized = reg.ReplaceAllString(sanitized, "-")
+	sanitized = sanitizeRegex2.ReplaceAllString(sanitized, "-")
 
 	// Remove leading/trailing hyphens
 	sanitized = strings.Trim(sanitized, "-")
