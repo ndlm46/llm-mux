@@ -279,18 +279,15 @@ func FilterSSEUsageMetadata(payload []byte) []byte {
 			continue
 		}
 		if traceID != "" {
-			stopChunkMutex.RLock()
+			stopChunkMutex.Lock()
 			expiry, ok := stopChunkWithoutUsage[traceID]
 			if ok && time.Now().Before(expiry) && hasUsageMetadata(rawJSON) {
-				stopChunkMutex.RUnlock()
-				stopChunkMutex.Lock()
 				delete(stopChunkWithoutUsage, traceID)
 				stopChunkMutex.Unlock()
 				modified = true
 				continue
-			} else {
-				stopChunkMutex.RUnlock()
 			}
+			stopChunkMutex.Unlock()
 		}
 
 		cleaned, changed := StripUsageMetadataFromJSON(rawJSON)

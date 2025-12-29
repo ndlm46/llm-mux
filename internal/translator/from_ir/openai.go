@@ -840,7 +840,8 @@ func NewResponsesStreamState() *ResponsesStreamState {
 }
 
 func formatResponsesSSE(et string, jb []byte) string {
-	var b strings.Builder
+	b := ir.GetStringBuilder()
+	defer ir.PutStringBuilder(b)
 	b.Grow(16 + len(et) + len(jb))
 	b.WriteString("event: ")
 	b.WriteString(et)

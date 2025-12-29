@@ -24,6 +24,7 @@ import (
 	coreauth "github.com/nghyane/llm-mux/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/nghyane/llm-mux/sdk/cliproxy/executor"
 	sdkconfig "github.com/nghyane/llm-mux/sdk/config"
+	log "github.com/sirupsen/logrus"
 )
 
 const kiroAPIURL = KiroDefaultBaseURL
@@ -256,7 +257,7 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *coreauth.Auth, r
 		return nil, fmt.Errorf("upstream error %d: %s", resp.StatusCode, string(body))
 	}
 
-	out := make(chan cliproxyexecutor.StreamChunk, 8)
+	out := make(chan cliproxyexecutor.StreamChunk, 32)
 	go e.processStream(ctx, resp, req.Model, out)
 	return out, nil
 }
@@ -264,6 +265,11 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *coreauth.Auth, r
 func (e *KiroExecutor) processStream(ctx context.Context, resp *http.Response, model string, out chan<- cliproxyexecutor.StreamChunk) {
 	defer resp.Body.Close()
 	defer close(out)
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("kiro executor: panic in stream goroutine: %v", r)
+		}
+	}()
 
 	buf := scannerBufferPool.Get().([]byte)
 	defer scannerBufferPool.Put(buf)

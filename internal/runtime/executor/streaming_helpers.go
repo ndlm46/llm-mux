@@ -118,10 +118,15 @@ func RunSSEStream(
 	processor StreamProcessor,
 	cfg StreamConfig,
 ) <-chan cliproxyexecutor.StreamChunk {
-	out := make(chan cliproxyexecutor.StreamChunk, 8)
+	out := make(chan cliproxyexecutor.StreamChunk, 32)
 
 	go func() {
 		defer close(out)
+		defer func() {
+			if r := recover(); r != nil {
+				log.Errorf("%s: panic in stream goroutine: %v", cfg.ExecutorName, r)
+			}
+		}()
 		defer func() {
 			if errClose := body.Close(); errClose != nil {
 				log.Errorf("%s: close response body error: %v", cfg.ExecutorName, errClose)
@@ -187,7 +192,16 @@ func RunSSEStream(
 				if reporter != nil {
 					reporter.publishFailure(ctx)
 				}
-				errorJSON := fmt.Sprintf(`data: {"error": {"message": "%s", "type": "server_error"}}\n\n`, err.Error())
+				if processor != nil {
+					if flushed, _ := processor.ProcessDone(); len(flushed) > 0 {
+						for _, chunk := range flushed {
+							if !sendChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: chunk}) {
+								return
+							}
+						}
+					}
+				}
+				errorJSON := fmt.Sprintf(`data: {"error": {"message": "%s", "type": "server_error"}}`+"\n\n", err.Error())
 				sendChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: []byte(errorJSON)})
 				return
 			}
@@ -198,7 +212,7 @@ func RunSSEStream(
 
 			if len(chunks) > 0 {
 				for _, chunk := range chunks {
-					if !sendChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: bytes.Clone(chunk)}) {
+					if !sendChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: chunk}) {
 						return
 					}
 				}
@@ -229,7 +243,7 @@ func RunSSEStream(
 			if reporter != nil {
 				reporter.publishFailure(ctx)
 			}
-			errorJSON := fmt.Sprintf(`data: {"error": {"message": "%s", "type": "server_error"}}\n\n`, errScan.Error())
+			errorJSON := fmt.Sprintf(`data: {"error": {"message": "%s", "type": "server_error"}}`+"\n\n", errScan.Error())
 			sendChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: []byte(errorJSON)})
 			return
 		}

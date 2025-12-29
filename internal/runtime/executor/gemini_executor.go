@@ -214,13 +214,18 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		_ = httpResp.Body.Close()
 		return nil, result.Error
 	}
-	out := make(chan cliproxyexecutor.StreamChunk, 8)
+	out := make(chan cliproxyexecutor.StreamChunk, 32)
 	stream = out
 
 	estimatedInputTokens := translation.EstimatedInputTokens
 
 	go func() {
 		defer close(out)
+		defer func() {
+			if r := recover(); r != nil {
+				log.Errorf("gemini executor: panic in stream goroutine: %v", r)
+			}
+		}()
 		defer func() {
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("gemini executor: close response body error: %v", errClose)
@@ -254,6 +259,15 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 			chunks, usage, err := processor.ProcessLine(bytes.Clone(payload))
 			if err != nil {
+				if flushed, _ := processor.ProcessDone(); len(flushed) > 0 {
+					for _, chunk := range flushed {
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
+						case <-ctx.Done():
+							return
+						}
+					}
+				}
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Err: err}:
 				case <-ctx.Done():
@@ -276,6 +290,16 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():
+			}
+			return
+		}
+		if flushed, _ := processor.ProcessDone(); len(flushed) > 0 {
+			for _, chunk := range flushed {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 	}()

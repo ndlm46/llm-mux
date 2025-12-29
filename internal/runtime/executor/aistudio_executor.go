@@ -18,6 +18,7 @@ import (
 	cliproxyauth "github.com/nghyane/llm-mux/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/nghyane/llm-mux/sdk/cliproxy/executor"
 	sdktranslator "github.com/nghyane/llm-mux/sdk/translator"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -134,11 +135,16 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		}
 		return nil, NewStatusError(firstEvent.Status, body.String(), nil)
 	}
-	out := make(chan cliproxyexecutor.StreamChunk, 8)
+	out := make(chan cliproxyexecutor.StreamChunk, 32)
 	stream = out
 
 	go func(first wsrelay.StreamEvent, inputTokens int64) {
 		defer close(out)
+		defer func() {
+			if r := recover(); r != nil {
+				log.Errorf("aistudio executor: panic in stream goroutine: %v", r)
+			}
+		}()
 
 		streamCtx := NewStreamContext()
 		streamCtx.EstimatedInputTokens = inputTokens
@@ -151,7 +157,10 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		processEvent := func(event wsrelay.StreamEvent) bool {
 			if event.Err != nil {
 				reporter.publishFailure(ctx)
-				out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("wsrelay: %v", event.Err)}
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("wsrelay: %v", event.Err)}:
+				case <-ctx.Done():
+				}
 				return false
 			}
 			switch event.Type {
@@ -162,24 +171,38 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 
 					chunks, usage, err := processor.ProcessLine(bytes.Clone(filtered))
 					if err != nil {
-						out <- cliproxyexecutor.StreamChunk{Err: err}
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Err: err}:
+						case <-ctx.Done():
+						}
 						return false
 					}
 					if usage != nil {
 						reporter.publish(ctx, usage)
 					}
 					for _, chunk := range chunks {
-						out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(chunk)}
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(chunk)}:
+						case <-ctx.Done():
+							return false
+						}
 					}
 					break
 				}
 			case wsrelay.MessageTypeStreamEnd:
 				if chunks, err := processor.ProcessDone(); err != nil {
-					out <- cliproxyexecutor.StreamChunk{Err: err}
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: err}:
+					case <-ctx.Done():
+					}
 					return false
 				} else {
 					for _, chunk := range chunks {
-						out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(chunk)}
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(chunk)}:
+						case <-ctx.Done():
+							return false
+						}
 					}
 				}
 				return false
@@ -187,19 +210,33 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 				fromFormat := sdktranslator.FromString("gemini")
 				translatedResp, err := TranslateResponseNonStream(e.cfg, fromFormat, opts.SourceFormat, event.Payload, req.Model)
 				if err != nil {
-					out <- cliproxyexecutor.StreamChunk{Err: err}
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: err}:
+					case <-ctx.Done():
+					}
 					return false
 				}
 				if translatedResp != nil {
-					out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(translatedResp)}
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(translatedResp)}:
+					case <-ctx.Done():
+						return false
+					}
 				} else {
-					out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(event.Payload)}
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(event.Payload)}:
+					case <-ctx.Done():
+						return false
+					}
 				}
 				reporter.publish(ctx, extractUsageFromGeminiResponse(event.Payload))
 				return false
 			case wsrelay.MessageTypeError:
 				reporter.publishFailure(ctx)
-				out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("wsrelay: %v", event.Err)}
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("wsrelay: %v", event.Err)}:
+				case <-ctx.Done():
+				}
 				return false
 			}
 			return true

@@ -122,9 +122,12 @@ func (p *pooledBrotliReadCloser) Read(b []byte) (int, error) {
 }
 
 func (p *pooledBrotliReadCloser) Close() error {
-	io.Copy(io.Discard, p.br)
+	// Close body first to terminate any ongoing stream - don't drain as it may block forever
+	err := p.body.Close()
+	// Reset reader for pool reuse without draining
+	p.br.Reset(nil)
 	brotliReaderPool.Put(p.br)
-	return p.body.Close()
+	return err
 }
 
 func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadCloser, error) {
