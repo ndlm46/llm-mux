@@ -9,234 +9,176 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// ParseClaudeRequest converts Claude API request to unified format.
 func ParseClaudeRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
-	// URL format fix: remove "format":"uri" which causes issues with some backends
-	rawJSON = bytes.Replace(rawJSON, []byte(`"url":{"type":"string","format":"uri",`), []byte(`"url":{"type":"string",`), -1)
+	// Remove "format":"uri" which causes issues with some backends
+	rawJSON = bytes.ReplaceAll(rawJSON, []byte(`"url":{"type":"string","format":"uri",`), []byte(`"url":{"type":"string",`))
 
 	parsed, err := ir.ParseAndValidateJSON(rawJSON)
 	if err != nil {
 		return nil, err
 	}
 
-	req := &ir.UnifiedChatRequest{}
+	req := &ir.UnifiedChatRequest{
+		Model: parsed.Get("model").String(),
+	}
 
-	req.Model = parsed.Get("model").String()
-
-	// Generation Parameters
 	if v := parsed.Get("max_tokens"); v.Exists() {
-		i := int(v.Int())
-		req.MaxTokens = &i
+		req.MaxTokens = ir.Ptr(int(v.Int()))
 	}
 	if v := parsed.Get("temperature"); v.Exists() {
-		f := v.Float()
-		req.Temperature = &f
+		req.Temperature = ir.Ptr(v.Float())
 	}
 	if v := parsed.Get("top_p"); v.Exists() {
-		f := v.Float()
-		req.TopP = &f
+		req.TopP = ir.Ptr(v.Float())
 	}
 	if v := parsed.Get("top_k"); v.Exists() {
-		i := int(v.Int())
-		req.TopK = &i
+		req.TopK = ir.Ptr(int(v.Int()))
 	}
-	if v := parsed.Get("stop_sequences"); v.Exists() && v.IsArray() {
-		for _, s := range v.Array() {
-			req.StopSequences = append(req.StopSequences, s.String())
-		}
+	for _, s := range parsed.Get("stop_sequences").Array() {
+		req.StopSequences = append(req.StopSequences, s.String())
 	}
 
-	// System message
 	if system := parsed.Get("system"); system.Exists() {
-		var systemText string
+		var text string
 		if system.Type == gjson.String {
-			systemText = system.String()
-		} else if system.IsArray() {
+			text = system.String()
+		} else {
 			var parts []string
-			for _, part := range system.Array() {
-				if part.Get("type").String() == "text" {
-					parts = append(parts, part.Get("text").String())
+			for _, p := range system.Array() {
+				if p.Get("type").String() == "text" {
+					parts = append(parts, p.Get("text").String())
 				}
 			}
-			systemText = strings.Join(parts, "\n")
+			text = strings.Join(parts, "\n")
 		}
-		if systemText != "" {
+		if text != "" {
 			req.Messages = append(req.Messages, ir.Message{
-				Role: ir.RoleSystem, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: systemText}},
+				Role:    ir.RoleSystem,
+				Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: text}},
 			})
 		}
 	}
 
-	// Messages
-	if messages := parsed.Get("messages"); messages.Exists() && messages.IsArray() {
-		for _, m := range messages.Array() {
-			req.Messages = append(req.Messages, parseClaudeMessage(m))
-		}
+	for _, m := range parsed.Get("messages").Array() {
+		req.Messages = append(req.Messages, parseClaudeMessage(m))
 	}
 
-	// Tools
-	if tools := parsed.Get("tools"); tools.Exists() && tools.IsArray() {
-		for _, t := range tools.Array() {
-			toolType := t.Get("type").String()
-			toolName := t.Get("name").String()
+	req.Metadata = make(map[string]any)
+	for _, t := range parsed.Get("tools").Array() {
+		toolType := t.Get("type").String()
+		toolName := t.Get("name").String()
 
-			// Handle Claude built-in tools (web_search, computer, etc.)
-			// Official format: {"type": "web_search_20250305", "name": "web_search", "max_uses": 5}
-			// IMPORTANT: Only treat as Claude built-in if it has the versioned type AND no input_schema.
-			if strings.HasPrefix(toolType, "web_search_") && !t.Get("input_schema").Exists() {
-				if req.Metadata == nil {
-					req.Metadata = make(map[string]any)
-				}
-				// Map to google_search for Gemini backend, preserve original type
+		// Built-in Claude tools (web_search, computer, etc.)
+		if !t.Get("input_schema").Exists() {
+			if strings.HasPrefix(toolType, "web_search_") {
 				wsConfig := map[string]any{"_original_type": toolType}
-				if maxUses := t.Get("max_uses"); maxUses.Exists() {
-					wsConfig["max_uses"] = int(maxUses.Int())
+				if v := t.Get("max_uses"); v.Exists() {
+					wsConfig["max_uses"] = int(v.Int())
 				}
 				req.Metadata[ir.MetaGoogleSearch] = wsConfig
 				continue
 			}
-
-			// Claude computer use tool: {"type": "computer_20241022", "name": "computer", ...}
-			if strings.HasPrefix(toolType, "computer_") && !t.Get("input_schema").Exists() {
-				if req.Metadata == nil {
-					req.Metadata = make(map[string]any)
+			if strings.HasPrefix(toolType, "computer_") {
+				conf := map[string]any{"_original_type": toolType}
+				if v := t.Get("display_width_px"); v.Exists() {
+					conf["display_width_px"] = int(v.Int())
 				}
-				// Store full tool config for passthrough, preserve original type
-				toolConfig := map[string]any{"_original_type": toolType}
-				if dw := t.Get("display_width_px"); dw.Exists() {
-					toolConfig["display_width_px"] = int(dw.Int())
+				if v := t.Get("display_height_px"); v.Exists() {
+					conf["display_height_px"] = int(v.Int())
 				}
-				if dh := t.Get("display_height_px"); dh.Exists() {
-					toolConfig["display_height_px"] = int(dh.Int())
+				if v := t.Get("display_number"); v.Exists() {
+					conf["display_number"] = int(v.Int())
 				}
-				if dn := t.Get("display_number"); dn.Exists() {
-					toolConfig["display_number"] = int(dn.Int())
-				}
-				req.Metadata[ir.MetaClaudeComputer] = toolConfig
+				req.Metadata[ir.MetaClaudeComputer] = conf
 				continue
 			}
-
-			// Claude bash tool: {"type": "bash_20241022", "name": "bash"}
-			if strings.HasPrefix(toolType, "bash_") && !t.Get("input_schema").Exists() {
-				if req.Metadata == nil {
-					req.Metadata = make(map[string]any)
-				}
+			if strings.HasPrefix(toolType, "bash_") {
 				req.Metadata[ir.MetaClaudeBash] = map[string]any{"_original_type": toolType}
 				continue
 			}
-
-			// Claude text editor tool: {"type": "text_editor_20241022", "name": "str_replace_editor"}
-			if strings.HasPrefix(toolType, "text_editor_") && !t.Get("input_schema").Exists() {
-				if req.Metadata == nil {
-					req.Metadata = make(map[string]any)
-				}
+			if strings.HasPrefix(toolType, "text_editor_") {
 				req.Metadata[ir.MetaClaudeTextEditor] = map[string]any{"_original_type": toolType}
 				continue
 			}
-
-			// Regular function tool
-			var params map[string]any
-			if schema := t.Get("input_schema"); schema.Exists() && schema.IsObject() {
-				if err := json.Unmarshal([]byte(schema.Raw), &params); err == nil {
-					params = ir.CleanJsonSchema(params)
-				}
-			}
-			if params == nil {
-				params = make(map[string]any)
-			}
-			req.Tools = append(req.Tools, ir.ToolDefinition{
-				Name: toolName, Description: t.Get("description").String(), Parameters: params,
-			})
 		}
+
+		// Regular function tool
+		var params map[string]any
+		if schema := t.Get("input_schema"); schema.Exists() {
+			if err := json.Unmarshal([]byte(schema.Raw), &params); err == nil {
+				params = ir.CleanJsonSchema(params)
+			}
+		}
+		if params == nil {
+			params = make(map[string]any)
+		}
+		req.Tools = append(req.Tools, ir.ToolDefinition{
+			Name:        toolName,
+			Description: t.Get("description").String(),
+			Parameters:  params,
+		})
 	}
 
-	// MCP Servers
-	if mcpServers := parsed.Get("mcp_servers"); mcpServers.Exists() && mcpServers.IsArray() {
-		for _, srv := range mcpServers.Array() {
-			mcpServer := ir.MCPServer{
-				Type: srv.Get("type").String(),
-				URL:  srv.Get("url").String(),
-				Name: srv.Get("name").String(),
-			}
-			if token := srv.Get("authorization_token"); token.Exists() {
-				mcpServer.AuthorizationToken = token.String()
-			}
-			if toolConfig := srv.Get("tool_configuration"); toolConfig.Exists() && toolConfig.IsObject() {
-				var cfg map[string]any
-				if err := json.Unmarshal([]byte(toolConfig.Raw), &cfg); err == nil {
-					mcpServer.ToolConfiguration = cfg
-				}
-			}
-			req.MCPServers = append(req.MCPServers, mcpServer)
+	for _, srv := range parsed.Get("mcp_servers").Array() {
+		mcp := ir.MCPServer{
+			Type:               srv.Get("type").String(),
+			URL:                srv.Get("url").String(),
+			Name:               srv.Get("name").String(),
+			AuthorizationToken: srv.Get("authorization_token").String(),
 		}
+		if cfg := srv.Get("tool_configuration"); cfg.IsObject() {
+			json.Unmarshal([]byte(cfg.Raw), &mcp.ToolConfiguration)
+		}
+		req.MCPServers = append(req.MCPServers, mcp)
 	}
 
-	// Thinking/Reasoning config
-	if thinking := parsed.Get("thinking"); thinking.Exists() && thinking.IsObject() {
+	if thinking := parsed.Get("thinking"); thinking.IsObject() {
 		if thinking.Get("type").String() == "enabled" {
-			req.Thinking = &ir.ThinkingConfig{IncludeThoughts: true}
-			if budget := thinking.Get("budget_tokens"); budget.Exists() {
-				b := int32(budget.Int())
-				req.Thinking.ThinkingBudget = &b
-			} else if budget := thinking.Get("budgetTokens"); budget.Exists() {
-				b := int32(budget.Int())
-				req.Thinking.ThinkingBudget = &b
+			budget := int32(thinking.Get("budget_tokens").Int())
+			if budget == 0 {
+				budget = int32(thinking.Get("budgetTokens").Int())
 			}
+			req.Thinking = &ir.ThinkingConfig{IncludeThoughts: true, ThinkingBudget: &budget}
 		} else if thinking.Get("type").String() == "disabled" {
-			zero := int32(0)
-			req.Thinking = &ir.ThinkingConfig{IncludeThoughts: false, ThinkingBudget: &zero}
+			req.Thinking = &ir.ThinkingConfig{IncludeThoughts: false, ThinkingBudget: ir.Ptr(int32(0))}
 		}
-		// Note: nil Thinking means auto/default behavior
 	}
 
-	// Tool choice
 	if tc := parsed.Get("tool_choice"); tc.Exists() {
 		if tc.IsObject() {
-			tcType := tc.Get("type").String()
-			switch tcType {
-			case "auto":
-				req.ToolChoice = "auto"
-			case "any":
-				req.ToolChoice = "required" // Claude "any" = OpenAI "required"
-				// Parse disable_parallel_tool_use (Claude-specific, inverted to ParallelToolCalls)
-				if dptu := tc.Get("disable_parallel_tool_use"); dptu.Exists() {
-					b := !dptu.Bool() // Invert: disable_parallel_tool_use=true → ParallelToolCalls=false
-					req.ParallelToolCalls = &b
-				}
-			case "tool":
-				req.ToolChoice = "function"
-				req.ToolChoiceFunction = tc.Get("name").String()
-				// Parse disable_parallel_tool_use for specific tool choice too
-				if dptu := tc.Get("disable_parallel_tool_use"); dptu.Exists() {
-					b := !dptu.Bool()
-					req.ParallelToolCalls = &b
-				}
-			case "none":
-				req.ToolChoice = "none"
-			}
-		} else if tc.Type == gjson.String {
-			// String format: "auto", "any", "none"
-			switch tc.String() {
+			switch tc.Get("type").String() {
 			case "auto":
 				req.ToolChoice = "auto"
 			case "any":
 				req.ToolChoice = "required"
+				if v := tc.Get("disable_parallel_tool_use"); v.Exists() {
+					req.ParallelToolCalls = ir.Ptr(!v.Bool())
+				}
+			case "tool":
+				req.ToolChoice = "function"
+				req.ToolChoiceFunction = tc.Get("name").String()
+				if v := tc.Get("disable_parallel_tool_use"); v.Exists() {
+					req.ParallelToolCalls = ir.Ptr(!v.Bool())
+				}
 			case "none":
 				req.ToolChoice = "none"
+			}
+		} else {
+			switch s := tc.String(); s {
+			case "any":
+				req.ToolChoice = "required"
+			default:
+				req.ToolChoice = s
 			}
 		}
 	}
 
-	// Metadata
-	if metadata := parsed.Get("metadata"); metadata.Exists() && metadata.IsObject() {
-		var meta map[string]any
-		if err := json.Unmarshal([]byte(metadata.Raw), &meta); err == nil {
-			// FIX: Merge instead of overwrite
-			if req.Metadata == nil {
-				req.Metadata = meta
-			} else {
-				for k, v := range meta {
-					req.Metadata[k] = v
-				}
+	if meta := parsed.Get("metadata"); meta.IsObject() {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(meta.Raw), &m); err == nil {
+			for k, v := range m {
+				req.Metadata[k] = v
 			}
 		}
 	}
@@ -245,257 +187,115 @@ func ParseClaudeRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 }
 
 func parseClaudeMessage(m gjson.Result) ir.Message {
-	roleStr := m.Get("role").String()
 	role := ir.RoleUser
-	if roleStr == "assistant" {
+	if m.Get("role").String() == "assistant" {
 		role = ir.RoleAssistant
 	}
 
 	msg := ir.Message{Role: role}
-	content := m.Get("content")
-
-	// Parse cache_control if present
-	if cc := m.Get("cache_control"); cc.Exists() && cc.IsObject() {
-		msg.CacheControl = &ir.CacheControl{
-			Type: cc.Get("type").String(),
-		}
-		if ttl := cc.Get("ttl"); ttl.Exists() {
-			ttlVal := ttl.Int()
-			msg.CacheControl.TTL = &ttlVal
+	if cc := m.Get("cache_control"); cc.IsObject() {
+		msg.CacheControl = &ir.CacheControl{Type: cc.Get("type").String()}
+		if v := cc.Get("ttl"); v.Exists() {
+			msg.CacheControl.TTL = ir.Ptr(v.Int())
 		}
 	}
 
+	content := m.Get("content")
 	if content.Type == gjson.String {
 		msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: content.String()})
-		return msg
-	}
-
-	if content.IsArray() {
+	} else {
 		for _, block := range content.Array() {
-			switch block.Get("type").String() {
+			switch t := block.Get("type").String(); t {
 			case "text":
 				msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: block.Get("text").String()})
-			case "thinking":
-				// Claude Extended Thinking: Parse thinking text and signature
-				var sig []byte
-				if s := block.Get("signature").String(); s != "" {
-					sig = []byte(s)
+			case "thinking", "reasoning":
+				textKey := "thinking"
+				if t == "reasoning" {
+					textKey = "text"
 				}
 				msg.Content = append(msg.Content, ir.ContentPart{
 					Type:             ir.ContentTypeReasoning,
-					Reasoning:        block.Get("thinking").String(),
-					ThoughtSignature: sig,
-				})
-			case "reasoning":
-				// OpenCode SDK / Vercel AI SDK "reasoning" block
-
-				var sig []byte
-				if s := block.Get("signature").String(); s != "" {
-					sig = []byte(s)
-				}
-				msg.Content = append(msg.Content, ir.ContentPart{
-					Type:             ir.ContentTypeReasoning,
-					Reasoning:        block.Get("text").String(),
-					ThoughtSignature: sig,
+					Reasoning:        block.Get(textKey).String(),
+					ThoughtSignature: []byte(block.Get("signature").String()),
 				})
 			case "redacted_thinking":
-				// Preserve encrypted content for protocol compliance
-				msg.Content = append(msg.Content, ir.ContentPart{
-					Type:         ir.ContentTypeRedactedThinking,
-					RedactedData: block.Get("data").String(),
-				})
+				msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeRedactedThinking, RedactedData: block.Get("data").String()})
 			case "image":
-				// Claude image block supports base64, url, and file sources
-				if source := block.Get("source"); source.Exists() {
-					sourceType := source.Get("type").String()
-					switch sourceType {
+				if src := block.Get("source"); src.Exists() {
+					part := ir.ContentPart{Type: ir.ContentTypeImage, Image: &ir.ImagePart{}}
+					switch src.Get("type").String() {
 					case "base64":
-						msg.Content = append(msg.Content, ir.ContentPart{
-							Type:  ir.ContentTypeImage,
-							Image: &ir.ImagePart{MimeType: source.Get("media_type").String(), Data: source.Get("data").String()},
-						})
+						part.Image.MimeType = src.Get("media_type").String()
+						part.Image.Data = src.Get("data").String()
 					case "url":
-						msg.Content = append(msg.Content, ir.ContentPart{
-							Type:  ir.ContentTypeImage,
-							Image: &ir.ImagePart{URL: source.Get("url").String()},
-						})
+						part.Image.URL = src.Get("url").String()
 					case "file":
-						// Claude Files API reference
-						msg.Content = append(msg.Content, ir.ContentPart{
-							Type:  ir.ContentTypeImage,
-							Image: &ir.ImagePart{FileID: source.Get("file_id").String()},
-						})
+						part.Image.FileID = src.Get("file_id").String()
 					}
+					msg.Content = append(msg.Content, part)
 				}
 			case "document":
-				// Claude document block (PDF, etc.)
-				// Supports: base64, url, file (file ID)
-				if source := block.Get("source"); source.Exists() {
-					sourceType := source.Get("type").String()
-					fp := &ir.FilePart{
-						Filename: block.Get("title").String(),
-						MimeType: source.Get("media_type").String(),
-					}
-					switch sourceType {
+				if src := block.Get("source"); src.Exists() {
+					fp := &ir.FilePart{Filename: block.Get("title").String(), MimeType: src.Get("media_type").String()}
+					switch src.Get("type").String() {
 					case "base64":
-						fp.FileData = source.Get("data").String()
+						fp.FileData = src.Get("data").String()
 					case "url":
-						fp.FileURL = source.Get("url").String()
+						fp.FileURL = src.Get("url").String()
 					case "file":
-						// Claude file ID reference
-						fp.FileID = source.Get("file_id").String()
+						fp.FileID = src.Get("file_id").String()
 					}
-					if fp.FileData != "" || fp.FileURL != "" || fp.FileID != "" {
-						msg.Content = append(msg.Content, ir.ContentPart{
-							Type: ir.ContentTypeFile,
-							File: fp,
-						})
-					}
+					msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeFile, File: fp})
 				}
-			case "tool_use":
-				toolID := block.Get("id").String()
-				inputRaw := block.Get("input").Raw
-				if inputRaw == "" {
-					inputRaw = "{}"
+			case "tool_use", "mcp_tool_use", "server_tool_use":
+				args := block.Get("input").Raw
+				if args == "" {
+					args = "{}"
 				}
-				msg.ToolCalls = append(msg.ToolCalls, ir.ToolCall{
-					ID: toolID, Name: block.Get("name").String(), Args: inputRaw,
-				})
-			case "tool_result":
-				resultContent := block.Get("content")
-				toolResultID := block.Get("tool_use_id").String()
-
-				toolResult := &ir.ToolResultPart{
-					ToolCallID: toolResultID,
-					IsError:    block.Get("is_error").Bool(),
-				}
-
-				if resultContent.Type == gjson.String {
-					toolResult.Result = resultContent.String()
-				} else if resultContent.IsArray() {
-					var textParts []string
-					for _, part := range resultContent.Array() {
-						partType := part.Get("type").String()
-						switch partType {
+				msg.ToolCalls = append(msg.ToolCalls, ir.ToolCall{ID: block.Get("id").String(), Name: block.Get("name").String(), Args: args})
+			case "tool_result", "mcp_tool_result", "web_search_tool_result":
+				res := &ir.ToolResultPart{ToolCallID: block.Get("tool_use_id").String(), IsError: block.Get("is_error").Bool()}
+				bc := block.Get("content")
+				if bc.Type == gjson.String {
+					res.Result = bc.String()
+				} else if bc.IsArray() {
+					var texts []string
+					for _, p := range bc.Array() {
+						switch p.Get("type").String() {
 						case "text":
-							textParts = append(textParts, part.Get("text").String())
+							texts = append(texts, p.Get("text").String())
 						case "image":
-							if source := part.Get("source"); source.Exists() {
-								sourceType := source.Get("type").String()
-								img := &ir.ImagePart{}
-								switch sourceType {
-								case "base64":
-									img.MimeType = source.Get("media_type").String()
-									img.Data = source.Get("data").String()
-								case "url":
-									img.URL = source.Get("url").String()
-								case "file":
-									img.FileID = source.Get("file_id").String()
-								}
-								if img.Data != "" || img.URL != "" || img.FileID != "" {
-									toolResult.Images = append(toolResult.Images, img)
-								}
+							if s := p.Get("source"); s.Exists() {
+								img := &ir.ImagePart{MimeType: s.Get("media_type").String(), Data: s.Get("data").String(), URL: s.Get("url").String(), FileID: s.Get("file_id").String()}
+								res.Images = append(res.Images, img)
 							}
 						case "document":
-							if source := part.Get("source"); source.Exists() {
-								sourceType := source.Get("type").String()
-								file := &ir.FilePart{
-									Filename: part.Get("title").String(),
-									MimeType: source.Get("media_type").String(),
-								}
-								switch sourceType {
-								case "base64":
-									file.FileData = source.Get("data").String()
-								case "url":
-									file.FileURL = source.Get("url").String()
-								case "file":
-									file.FileID = source.Get("file_id").String()
-								}
-								if file.FileData != "" || file.FileURL != "" || file.FileID != "" {
-									toolResult.Files = append(toolResult.Files, file)
-								}
+							if s := p.Get("source"); s.Exists() {
+								res.Files = append(res.Files, &ir.FilePart{Filename: p.Get("title").String(), MimeType: s.Get("media_type").String(), FileData: s.Get("data").String(), FileURL: s.Get("url").String(), FileID: s.Get("file_id").String()})
 							}
 						}
 					}
-					toolResult.Result = strings.Join(textParts, "\n")
+					res.Result = strings.Join(texts, "\n")
 				} else {
-					toolResult.Result = resultContent.Raw
+					res.Result = bc.Raw
 				}
-
-				msg.Content = append(msg.Content, ir.ContentPart{
-					Type:       ir.ContentTypeToolResult,
-					ToolResult: toolResult,
-				})
-			case "mcp_tool_use":
-				// MCP tool use from Claude - treat like regular tool call with server info in metadata
-				toolID := block.Get("id").String()
-				inputRaw := block.Get("input").Raw
-				if inputRaw == "" {
-					inputRaw = "{}"
-				}
-				msg.ToolCalls = append(msg.ToolCalls, ir.ToolCall{
-					ID:   toolID,
-					Name: block.Get("name").String(),
-					Args: inputRaw,
-				})
-				// Note: server_name is tracked implicitly - when rebuilding for Claude,
-				// we detect MCP tools by the mcptoolu_ prefix in the ID
-			case "mcp_tool_result":
-				// MCP tool result - treat like regular tool result
-				resultContent := block.Get("content")
-				var resultStr string
-				if resultContent.Type == gjson.String {
-					resultStr = resultContent.String()
-				} else if resultContent.IsArray() {
-					var parts []string
-					for _, part := range resultContent.Array() {
-						if part.Get("type").String() == "text" {
-							parts = append(parts, part.Get("text").String())
-						}
-					}
-					resultStr = strings.Join(parts, "\n")
-				} else {
-					resultStr = resultContent.Raw
-				}
-				msg.Content = append(msg.Content, ir.ContentPart{
-					Type:       ir.ContentTypeToolResult,
-					ToolResult: &ir.ToolResultPart{ToolCallID: block.Get("tool_use_id").String(), Result: resultStr},
-				})
-			case "server_tool_use":
-				// Server-side tool invocation (web search, etc.)
-				toolID := block.Get("id").String()
-				toolName := block.Get("name").String()
-				msg.ToolCalls = append(msg.ToolCalls, ir.ToolCall{
-					ID: toolID, Name: toolName, Args: block.Get("input").Raw,
-				})
-			case "web_search_tool_result":
-				// Web search results from server
-				msg.Content = append(msg.Content, ir.ContentPart{
-					Type: ir.ContentTypeToolResult,
-					ToolResult: &ir.ToolResultPart{
-						ToolCallID: block.Get("tool_use_id").String(),
-						Result:     block.Get("content").Raw, // Preserve full result
-					},
-				})
+				msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeToolResult, ToolResult: res})
 			}
 		}
 	}
 
-	// Normalize role: if user message only contains tool_result parts, treat as RoleTool
-	// This ensures proper translation to OpenAI format where tool results are separate messages
 	if msg.Role == ir.RoleUser && len(msg.Content) > 0 {
-		allToolResults := true
-		for _, part := range msg.Content {
-			if part.Type != ir.ContentTypeToolResult {
-				allToolResults = false
+		onlyTools := true
+		for _, p := range msg.Content {
+			if p.Type != ir.ContentTypeToolResult {
+				onlyTools = false
 				break
 			}
 		}
-		if allToolResults {
+		if onlyTools {
 			msg.Role = ir.RoleTool
 		}
 	}
-
 	return msg
 }
 
@@ -504,23 +304,18 @@ func ParseClaudeResponse(rawJSON []byte) ([]ir.Message, *ir.Usage, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-
 	var usage *ir.Usage
 	if u := parsed.Get("usage"); u.Exists() {
 		usage = ir.ParseClaudeUsage(u)
 	}
-
 	content := parsed.Get("content")
-	if !content.Exists() || !content.IsArray() {
+	if !content.IsArray() {
 		return nil, usage, nil
 	}
-
 	msg := ir.Message{Role: ir.RoleAssistant}
-
 	for _, block := range content.Array() {
 		ir.ParseClaudeContentBlock(block, &msg)
 	}
-
 	if len(msg.Content) > 0 || len(msg.ToolCalls) > 0 {
 		return []ir.Message{msg}, usage, nil
 	}
@@ -531,22 +326,13 @@ func ParseClaudeChunk(rawJSON []byte) ([]ir.UnifiedEvent, error) {
 	return ParseClaudeChunkWithState(rawJSON, nil)
 }
 
-// ParseClaudeChunkWithState parses Claude SSE chunk with state tracking for signatures.
-// State is required to properly handle signature_delta events which arrive separately
-// from thinking_delta events. Without state, signatures will be lost.
 func ParseClaudeChunkWithState(rawJSON []byte, state *ir.ClaudeStreamParserState) ([]ir.UnifiedEvent, error) {
 	data := ir.ExtractSSEData(rawJSON)
 	if len(data) == 0 {
 		return nil, nil
 	}
-	parsed, err := ir.ParseAndValidateJSON(data)
-	if err != nil {
-		return nil, nil // Ignore invalid chunks in streaming
-	}
-
+	parsed, _ := ir.ParseAndValidateJSON(data)
 	switch parsed.Get("type").String() {
-	case "ping":
-		return nil, nil // Heartbeat, ignore
 	case "content_block_start":
 		return ir.ParseClaudeContentBlockStart(parsed, state), nil
 	case "content_block_delta":
@@ -563,11 +349,6 @@ func ParseClaudeChunkWithState(rawJSON []byte, state *ir.ClaudeStreamParserState
 	return nil, nil
 }
 
-// ClaudeAPIError represents an error from Claude API
-type ClaudeAPIError struct {
-	Message string
-}
+type ClaudeAPIError struct{ Message string }
 
-func (e *ClaudeAPIError) Error() string {
-	return e.Message
-}
+func (e *ClaudeAPIError) Error() string { return e.Message }

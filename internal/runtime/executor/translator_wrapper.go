@@ -163,6 +163,88 @@ func convertEventsToGemini(events []ir.UnifiedEvent, model string) ([][]byte, er
 	return chunks, nil
 }
 
+// convertEventsToGeminiWithDelay converts IR events to Gemini format with 1-chunk delay.
+// This allows merging finish info into the last content chunk, which is required because
+// SDK Python rejects finish-only chunks without valid content.
+// Strategy:
+//   - Hold the previous chunk in state.PendingGeminiChunk
+//   - When new chunk arrives, emit pending and hold new
+//   - When finish event arrives, merge finish into pending and emit
+func convertEventsToGeminiWithDelay(events []ir.UnifiedEvent, model string, state *GeminiCLIStreamState) ([][]byte, error) {
+	var chunks [][]byte
+
+	for _, event := range events {
+		if event.Type == ir.EventTypeFinish {
+			// Finish event: merge into pending chunk and emit
+			state.PendingFinishEvent = &event
+			continue
+		}
+
+		// Content event: convert to chunk
+		chunk, err := from_ir.ToGeminiChunk(event, model)
+		if err != nil {
+			return nil, err
+		}
+		if chunk == nil {
+			continue
+		}
+
+		// If we have a pending chunk, emit it now
+		if len(state.PendingGeminiChunk) > 0 {
+			chunks = append(chunks, state.PendingGeminiChunk)
+		}
+
+		// Hold current chunk as pending
+		state.PendingGeminiChunk = chunk
+	}
+
+	// If we have pending finish event and pending chunk, merge them
+	if state.PendingFinishEvent != nil && len(state.PendingGeminiChunk) > 0 {
+		mergedChunk, err := mergeFinishIntoGeminiChunk(state.PendingGeminiChunk, state.PendingFinishEvent)
+		if err != nil {
+			return nil, err
+		}
+		chunks = append(chunks, mergedChunk)
+		state.PendingGeminiChunk = nil
+		state.PendingFinishEvent = nil
+	}
+
+	return chunks, nil
+}
+
+// mergeFinishIntoGeminiChunk adds finishReason and usage to an existing Gemini chunk.
+func mergeFinishIntoGeminiChunk(chunk []byte, finishEvent *ir.UnifiedEvent) ([]byte, error) {
+	// Remove trailing newline if present
+	if len(chunk) > 0 && chunk[len(chunk)-1] == '\n' {
+		chunk = chunk[:len(chunk)-1]
+	}
+
+	// Add finishReason to candidate
+	result, err := sjson.SetBytes(chunk, "candidates.0.finishReason", "STOP")
+	if err != nil {
+		return nil, err
+	}
+
+	// Add usage metadata if present
+	if finishEvent.Usage != nil {
+		usageMetadata := map[string]any{
+			"promptTokenCount":     finishEvent.Usage.PromptTokens,
+			"candidatesTokenCount": finishEvent.Usage.CompletionTokens,
+			"totalTokenCount":      finishEvent.Usage.TotalTokens,
+		}
+		if finishEvent.Usage.ThoughtsTokenCount > 0 {
+			usageMetadata["thoughtsTokenCount"] = finishEvent.Usage.ThoughtsTokenCount
+		}
+		result, err = sjson.SetBytes(result, "usageMetadata", usageMetadata)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Add trailing newline back
+	return append(result, '\n'), nil
+}
+
 // geminiPreprocessor handles state tracking for Gemini-sourced streams.
 // Tracks tool calls, reasoning accumulation, and finish event handling.
 func geminiPreprocessor(event *ir.UnifiedEvent, state *StreamState) bool {
@@ -326,6 +408,7 @@ func TranslateToGeminiCLIWithTokens(cfg *config.Config, from sdktranslator.Forma
 	// Early passthrough for gemini formats (except Claude models)
 	fromStr := from.String()
 	isClaudeModel := strings.Contains(model, "claude")
+
 	if (fromStr == "gemini" || fromStr == "gemini-cli") && !isClaudeModel {
 		cliPayload, _ := sjson.SetRawBytes([]byte(`{}`), "request", payload)
 		return &TranslationResult{
@@ -339,25 +422,26 @@ func TranslateToGeminiCLIWithTokens(cfg *config.Config, from sdktranslator.Forma
 		return nil, err
 	}
 
-	// Antigravity API does not return thinking content in non-streaming responses.
-	// Disable thinking for Claude models in non-streaming mode to avoid confusion and wasted tokens.
-	if isClaudeModel && !streaming && irReq.Thinking != nil {
-		irReq.Thinking = nil
-		if irReq.Metadata == nil {
-			irReq.Metadata = make(map[string]any)
-		}
-		irReq.Metadata[ir.MetaForceDisableThinking] = true
+	// Claude Vertex: Merge fragmented thinking chunks from Gemini SDK history
+	if isClaudeModel && (fromStr == "gemini" || fromStr == "gemini-cli") {
+		irReq.Messages = to_ir.MergeConsecutiveModelThinking(irReq.Messages)
 	}
 
-	// Claude Vertex API requires valid cryptographic signatures for thinking blocks.
-	// If history has assistant messages with tool_use but no thinking blocks,
-	// we cannot inject fake signatures - must disable thinking for this request.
-	if isClaudeModel && irReq.Thinking != nil && hasToolUseWithoutThinking(irReq.Messages) {
-		irReq.Thinking = nil
-		if irReq.Metadata == nil {
-			irReq.Metadata = make(map[string]any)
+	// Claude thinking: ensure -thinking models have config, map regular models if user enables thinking
+	if isClaudeModel {
+		if strings.HasSuffix(model, "-thinking") {
+			if irReq.Thinking == nil {
+				budget := int32(1024)
+				irReq.Thinking = &ir.ThinkingConfig{
+					ThinkingBudget:  &budget,
+					IncludeThoughts: true,
+				}
+			}
+		} else if irReq.Thinking != nil {
+			if thinkingModel := model + "-thinking"; registry.GetGlobalRegistry().GetModelInfo(thinkingModel) != nil {
+				irReq.Model = thinkingModel
+			}
 		}
-		irReq.Metadata[ir.MetaForceDisableThinking] = true
 	}
 
 	geminiJSON, err := (&from_ir.GeminiCLIProvider{}).ConvertRequest(irReq)
@@ -934,6 +1018,11 @@ type GeminiCLIStreamState struct {
 	ToolSchemaCtx *ir.ToolSchemaContext // Schema context for normalizing tool call parameters
 	FinishSent    bool                  // Track if finish event was already sent (prevent duplicates)
 	HasToolCalls  bool                  // Track if any tool calls were seen across chunks (for correct finish_reason)
+
+	// For Gemini format output: hold pending chunk to merge finish info
+	// Claude Vertex sends finish in separate chunk which SDK rejects
+	PendingGeminiChunk []byte
+	PendingFinishEvent *ir.UnifiedEvent
 }
 
 // NewAntigravityStreamState creates a new stream state with tool schema context for Antigravity provider.
@@ -1028,9 +1117,11 @@ func TranslateGeminiCLIResponseStream(cfg *config.Config, to sdktranslator.Forma
 // TranslateGeminiCLIResponseStreamWithUsage converts Gemini CLI streaming chunk and extracts usage.
 // This eliminates duplicate parsing by returning both translated chunks and usage in one operation.
 func TranslateGeminiCLIResponseStreamWithUsage(cfg *config.Config, to sdktranslator.Format, geminiChunk []byte, model string, messageID string, state *GeminiCLIStreamState) (*StreamTranslationResult, error) {
-	// Early passthrough for gemini formats (no IR conversion needed)
 	toStr := to.String()
-	if toStr == "gemini" || toStr == "gemini-cli" {
+	isClaudeModel := strings.Contains(model, "claude")
+
+	// Early passthrough for gemini formats (except Claude models which need special handling)
+	if (toStr == "gemini" || toStr == "gemini-cli") && !isClaudeModel {
 		if responseWrapper := gjson.GetBytes(geminiChunk, "response"); responseWrapper.Exists() {
 			return &StreamTranslationResult{Chunks: [][]byte{[]byte(responseWrapper.Raw)}}, nil
 		}
@@ -1081,6 +1172,10 @@ func TranslateGeminiCLIResponseStreamWithUsage(cfg *config.Config, to sdktransla
 		chunks, err = convertEventsToClaude(events, model, messageID, ss, nil)
 	case "ollama":
 		chunks, err = convertEventsToOllama(events, model, nil, ss)
+	case "gemini", "gemini-cli":
+		// Claude models: use delay-1-chunk strategy to merge finish into content chunk
+		// SDK rejects finish-only chunks without content
+		chunks, err = convertEventsToGeminiWithDelay(events, model, state)
 	default:
 		return &StreamTranslationResult{}, nil
 	}
@@ -1633,37 +1728,4 @@ func TranslateOpenAIResponseNonStream(cfg *config.Config, to sdktranslator.Forma
 // translation doesn't require IR-based conversion.
 func TranslateTokenCount(ctx context.Context, to, from sdktranslator.Format, count int64, usageJSON []byte) string {
 	return sdktranslator.TranslateTokenCount(ctx, to, from, count, usageJSON)
-}
-
-// hasToolUseWithoutThinking checks if any assistant message has tool calls but no thinking content.
-// Claude Vertex API requires valid cryptographic signatures for thinking blocks in history.
-// If client doesn't provide thinking blocks with signatures, we must disable thinking.
-func hasToolUseWithoutThinking(messages []ir.Message) bool {
-	for i := range messages {
-		msg := &messages[i]
-		if msg.Role != ir.RoleAssistant || len(msg.ToolCalls) == 0 {
-			continue
-		}
-		// Check if this assistant message has thinking content (including redacted_thinking)
-		hasThinking := false
-		for j := range msg.Content {
-			switch msg.Content[j].Type {
-			case ir.ContentTypeReasoning:
-				if msg.Content[j].Reasoning != "" {
-					hasThinking = true
-				}
-			case ir.ContentTypeRedactedThinking:
-				if msg.Content[j].RedactedData != "" {
-					hasThinking = true
-				}
-			}
-			if hasThinking {
-				break
-			}
-		}
-		if !hasThinking {
-			return true
-		}
-	}
-	return false
 }

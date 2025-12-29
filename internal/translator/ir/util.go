@@ -42,6 +42,11 @@ func BytesToString(b []byte) string {
 	return string(b)
 }
 
+// Ptr returns a pointer to the given value.
+func Ptr[T any](v T) *T {
+	return &v
+}
+
 // ErrInvalidJSON is returned when JSON parsing fails.
 var ErrInvalidJSON = &json.UnmarshalTypeError{Value: "invalid json"}
 

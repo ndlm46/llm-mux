@@ -1,4 +1,3 @@
-// Package to_ir converts provider-specific API formats into unified format.
 package to_ir
 
 import (
@@ -13,260 +12,192 @@ import (
 )
 
 // ParseOpenAIRequest parses incoming OpenAI request from client into unified format.
-// Automatically detects format: Chat Completions API uses "messages", Responses API uses "input".
-// This allows the proxy to accept requests from any OpenAI-compatible client (Cursor, Cline, Codex CLI, etc.)
 func ParseOpenAIRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
-	// Parse JSON once and validate by checking existence (avoids double-parsing)
-	root := gjson.ParseBytes(rawJSON)
-	if !root.Exists() || root.Type == gjson.Null {
-		return nil, ir.ErrInvalidJSON
+	root, err := ir.ParseAndValidateJSON(rawJSON)
+	if err != nil {
+		return nil, err
 	}
+
 	req := &ir.UnifiedChatRequest{
 		Model:    root.Get("model").String(),
-		Metadata: make(map[string]any, 8), // Pre-allocate for common metadata fields
+		Metadata: make(map[string]any, 8),
 	}
 
 	if v := root.Get("temperature"); v.Exists() {
-		f := v.Float()
-		req.Temperature = &f
+		req.Temperature = ir.Ptr(v.Float())
 	}
 	if v := root.Get("top_p"); v.Exists() {
-		f := v.Float()
-		req.TopP = &f
+		req.TopP = ir.Ptr(v.Float())
 	}
 	if v := root.Get("top_k"); v.Exists() {
-		i := int(v.Int())
-		req.TopK = &i
+		req.TopK = ir.Ptr(int(v.Int()))
 	}
+
 	if v := root.Get("max_tokens"); v.Exists() {
-		i := int(v.Int())
-		req.MaxTokens = &i
+		req.MaxTokens = ir.Ptr(int(v.Int()))
 	} else if v := root.Get("max_output_tokens"); v.Exists() {
-		i := int(v.Int())
-		req.MaxTokens = &i
+		req.MaxTokens = ir.Ptr(int(v.Int()))
 	} else if v := root.Get("max_completion_tokens"); v.Exists() {
-		i := int(v.Int())
-		req.MaxTokens = &i
+		req.MaxTokens = ir.Ptr(int(v.Int()))
 	}
 
 	if v := root.Get("stop"); v.Exists() {
 		if v.IsArray() {
-			arr := v.Array()
-			req.StopSequences = make([]string, 0, len(arr))
-			for _, s := range arr {
+			for _, s := range v.Array() {
 				req.StopSequences = append(req.StopSequences, s.String())
 			}
 		} else {
-			req.StopSequences = make([]string, 0, 1)
-			req.StopSequences = append(req.StopSequences, v.String())
+			req.StopSequences = []string{v.String()}
 		}
 	}
 	if v := root.Get("frequency_penalty"); v.Exists() {
-		f := v.Float()
-		req.FrequencyPenalty = &f
+		req.FrequencyPenalty = ir.Ptr(v.Float())
 	}
 	if v := root.Get("presence_penalty"); v.Exists() {
-		f := v.Float()
-		req.PresencePenalty = &f
+		req.PresencePenalty = ir.Ptr(v.Float())
 	}
 	if v := root.Get("logprobs"); v.Exists() {
-		b := v.Bool()
-		req.Logprobs = &b
+		req.Logprobs = ir.Ptr(v.Bool())
 	}
 	if v := root.Get("top_logprobs"); v.Exists() {
-		i := int(v.Int())
-		req.TopLogprobs = &i
+		req.TopLogprobs = ir.Ptr(int(v.Int()))
 	}
 	if v := root.Get("n"); v.Exists() {
-		i := int(v.Int())
-		req.CandidateCount = &i
+		req.CandidateCount = ir.Ptr(int(v.Int()))
 	}
 
-	// Auto-detect API format by checking which field exists
 	if input := root.Get("input"); input.Exists() && !root.Get("messages").Exists() {
 		parseResponsesAPIFields(root, req)
-	} else if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
-		for _, m := range messages.Array() {
+	} else {
+		for _, m := range root.Get("messages").Array() {
 			req.Messages = append(req.Messages, parseOpenAIMessage(m))
 		}
 	}
 
-	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
-		for _, t := range tools.Array() {
-			toolType := t.Get("type").String()
-
-			// OpenAI official web search: {"type": "web_search_preview"}
-			if strings.HasPrefix(toolType, "web_search") && !t.Get("function").Exists() {
-				// Map to google_search for Gemini backend
-				gsConfig := map[string]any{}
-				// Preserve search_context_size if provided
-				if scs := t.Get("search_context_size"); scs.Exists() {
-					gsConfig["search_context_size"] = scs.String()
+	for _, t := range root.Get("tools").Array() {
+		toolType := t.Get("type").String()
+		if !t.Get("function").Exists() {
+			if strings.HasPrefix(toolType, "web_search") {
+				conf := map[string]any{}
+				if v := t.Get("search_context_size"); v.Exists() {
+					conf["search_context_size"] = v.String()
 				}
-				// Preserve user_location if provided
-				if ul := t.Get("user_location"); ul.Exists() && ul.IsObject() {
-					var ulVal any
-					if json.Unmarshal([]byte(ul.Raw), &ulVal) == nil {
-						gsConfig["user_location"] = ulVal
+				if v := t.Get("user_location"); v.IsObject() {
+					var val any
+					if json.Unmarshal([]byte(v.Raw), &val) == nil {
+						conf["user_location"] = val
 					}
 				}
-				req.Metadata[ir.MetaGoogleSearch] = gsConfig
+				req.Metadata[ir.MetaGoogleSearch] = conf
 				continue
 			}
-
-			// OpenAI code_interpreter tool → maps to Gemini codeExecution
-			if toolType == "code_interpreter" && !t.Get("function").Exists() {
-				ciConfig := map[string]any{}
-				// Preserve container config if provided
-				if container := t.Get("container"); container.Exists() && container.IsObject() {
-					var containerVal any
-					if json.Unmarshal([]byte(container.Raw), &containerVal) == nil {
-						ciConfig["container"] = containerVal
+			if toolType == "code_interpreter" {
+				conf := map[string]any{}
+				if v := t.Get("container"); v.IsObject() {
+					var val any
+					if json.Unmarshal([]byte(v.Raw), &val) == nil {
+						conf["container"] = val
 					}
 				}
-				req.Metadata[ir.MetaCodeExecution] = ciConfig
+				req.Metadata[ir.MetaCodeExecution] = conf
 				continue
 			}
-
-			// OpenAI file_search tool → maps to Gemini fileSearch (if supported)
-			if toolType == "file_search" && !t.Get("function").Exists() {
-				fsConfig := map[string]any{}
-				// Preserve vector_store config if provided
-				if vs := t.Get("vector_store"); vs.Exists() && vs.IsObject() {
-					var vsVal any
-					if json.Unmarshal([]byte(vs.Raw), &vsVal) == nil {
-						fsConfig["vector_store"] = vsVal
+			if toolType == "file_search" {
+				conf := map[string]any{}
+				if v := t.Get("vector_store"); v.IsObject() {
+					var val any
+					if json.Unmarshal([]byte(v.Raw), &val) == nil {
+						conf["vector_store"] = val
 					}
 				}
-				// Preserve max_num_results if provided
-				if mnr := t.Get("max_num_results"); mnr.Exists() {
-					fsConfig["max_num_results"] = int(mnr.Int())
+				if v := t.Get("max_num_results"); v.Exists() {
+					conf["max_num_results"] = int(v.Int())
 				}
-				// Preserve ranking_options if provided
-				if ro := t.Get("ranking_options"); ro.Exists() && ro.IsObject() {
-					var roVal any
-					if json.Unmarshal([]byte(ro.Raw), &roVal) == nil {
-						fsConfig["ranking_options"] = roVal
+				if v := t.Get("ranking_options"); v.IsObject() {
+					var val any
+					if json.Unmarshal([]byte(v.Raw), &val) == nil {
+						conf["ranking_options"] = val
 					}
 				}
-				req.Metadata[ir.MetaFileSearch] = fsConfig
+				req.Metadata[ir.MetaFileSearch] = conf
 				continue
 			}
-
-			if tool := parseOpenAITool(t); tool != nil {
-				req.Tools = append(req.Tools, *tool)
-			}
+		}
+		if tool := parseOpenAITool(t); tool != nil {
+			req.Tools = append(req.Tools, *tool)
 		}
 	}
 
 	if v := root.Get("parallel_tool_calls"); v.Exists() {
-		b := v.Bool()
-		req.ParallelToolCalls = &b
+		req.ParallelToolCalls = ir.Ptr(v.Bool())
 	}
-	if mods := root.Get("modalities"); mods.Exists() && mods.IsArray() {
-		for _, m := range mods.Array() {
-			req.ResponseModality = append(req.ResponseModality, strings.ToUpper(m.String()))
-		}
+	for _, m := range root.Get("modalities").Array() {
+		req.ResponseModality = append(req.ResponseModality, strings.ToUpper(m.String()))
 	}
-	if imgCfg := root.Get("image_config"); imgCfg.Exists() && imgCfg.IsObject() {
+	if v := root.Get("image_config"); v.IsObject() {
 		req.ImageConfig = &ir.ImageConfig{
-			AspectRatio: imgCfg.Get("aspect_ratio").String(),
-			ImageSize:   imgCfg.Get("image_size").String(),
+			AspectRatio: v.Get("aspect_ratio").String(),
+			ImageSize:   v.Get("image_size").String(),
 		}
 	}
-
-	// Parse audio config for OpenAI audio models (gpt-4o-audio-preview)
-	if audioCfg := root.Get("audio"); audioCfg.Exists() && audioCfg.IsObject() {
+	if v := root.Get("audio"); v.IsObject() {
 		req.AudioConfig = &ir.AudioConfig{
-			Voice:  audioCfg.Get("voice").String(),
-			Format: audioCfg.Get("format").String(),
+			Voice:  v.Get("voice").String(),
+			Format: v.Get("format").String(),
 		}
 	}
-
-	if prediction := root.Get("prediction"); prediction.Exists() && prediction.IsObject() {
-		pType := prediction.Get("type").String()
-		if pType == "content" {
-			req.Prediction = &ir.PredictionConfig{
-				Type:    pType,
-				Content: prediction.Get("content").String(),
-			}
-		}
+	if v := root.Get("prediction"); v.IsObject() && v.Get("type").String() == "content" {
+		req.Prediction = &ir.PredictionConfig{Type: "content", Content: v.Get("content").String()}
 	}
-
-	if so := root.Get("stream_options"); so.Exists() && so.IsObject() {
-		req.StreamOptions = &ir.StreamOptionsConfig{
-			IncludeUsage: so.Get("include_usage").Bool(),
-		}
+	if v := root.Get("stream_options"); v.IsObject() {
+		req.StreamOptions = &ir.StreamOptionsConfig{IncludeUsage: v.Get("include_usage").Bool()}
 	}
 
 	req.Thinking = parseThinkingConfig(root)
 
 	if rf := root.Get("response_format"); rf.Exists() {
 		if rf.Get("type").String() == "json_schema" {
-			if name := rf.Get("json_schema.name"); name.Exists() {
-				req.ResponseSchemaName = name.String()
-			}
-			if schema := rf.Get("json_schema.schema"); schema.Exists() {
-				var schemaMap map[string]any
-				if json.Unmarshal([]byte(schema.Raw), &schemaMap) == nil {
-					req.ResponseSchema = schemaMap
+			req.ResponseSchemaName = rf.Get("json_schema.name").String()
+			if v := rf.Get("json_schema.schema"); v.IsObject() {
+				var schema map[string]any
+				if json.Unmarshal([]byte(v.Raw), &schema) == nil {
+					req.ResponseSchema = schema
 				}
 			}
-			if strict := rf.Get("json_schema.strict"); strict.Exists() {
-				req.ResponseSchemaStrict = strict.Bool()
-			}
+			req.ResponseSchemaStrict = rf.Get("json_schema.strict").Bool()
 		} else if rf.Get("type").String() == "json_object" {
 			req.Metadata["ollama_format"] = "json"
 		}
 	}
 
-	if v := root.Get("logit_bias"); v.Exists() && v.IsObject() {
-		var logitBias map[string]any
-		if json.Unmarshal([]byte(v.Raw), &logitBias) == nil {
-			req.Metadata[ir.MetaOpenAILogitBias] = logitBias
+	if v := root.Get("logit_bias"); v.IsObject() {
+		var lb any
+		if json.Unmarshal([]byte(v.Raw), &lb) == nil {
+			req.Metadata[ir.MetaOpenAILogitBias] = lb
 		}
 	}
 	if v := root.Get("seed"); v.Exists() {
 		req.Metadata[ir.MetaOpenAISeed] = int(v.Int())
 	}
-	if v := root.Get("user"); v.Exists() && v.String() != "" {
-		req.Metadata[ir.MetaOpenAIUser] = v.String()
+	if v := root.Get("user").String(); v != "" {
+		req.Metadata[ir.MetaOpenAIUser] = v
 	}
-
-	// Parse service_tier if present (OpenAI-specific)
-	if v := root.Get("service_tier"); v.Exists() && v.String() != "" {
-		req.ServiceTier = ir.ServiceTier(v.String())
+	if v := root.Get("service_tier").String(); v != "" {
+		req.ServiceTier = ir.ServiceTier(v)
 	}
 
 	if v := root.Get("tool_choice"); v.Exists() {
 		if v.IsObject() {
-			tcType := v.Get("type").String()
-			if tcType == "function" {
+			t := v.Get("type").String()
+			if t == "function" || (t == "" && v.Get("function.name").Exists()) {
 				req.ToolChoice = "function"
-				if fn := v.Get("function.name"); fn.Exists() {
-					req.ToolChoiceFunction = fn.String()
+				req.ToolChoiceFunction = v.Get("function.name").String()
+				for _, a := range v.Get("allowed_tools").Array() {
+					req.AllowedTools = append(req.AllowedTools, a.String())
 				}
-				// Parse allowed_tools for GPT-5+ (subset of tools model can use)
-				if allowed := v.Get("allowed_tools"); allowed.Exists() && allowed.IsArray() {
-					for _, t := range allowed.Array() {
-						req.AllowedTools = append(req.AllowedTools, t.String())
-					}
-				}
-			} else if tcType == "required" || tcType == "any" {
-				req.ToolChoice = tcType
-			} else if tcType == "none" || tcType == "auto" {
-				// Explicit none/auto in object format
-				req.ToolChoice = tcType
-			} else if tcType != "" {
-				// Unknown type - use as-is for forward compatibility
-				req.ToolChoice = tcType
-			} else if fn := v.Get("function.name"); fn.Exists() {
-				// Handle object format without explicit type but with function.name
-				// Some clients send: {"function": {"name": "..."}} without "type": "function"
-				req.ToolChoice = "function"
-				req.ToolChoiceFunction = fn.String()
+			} else {
+				req.ToolChoice = t
 			}
-			// If tcType is empty and no function, leave ToolChoice unset (defaults to auto behavior)
 		} else {
 			req.ToolChoice = v.String()
 		}
@@ -275,120 +206,88 @@ func ParseOpenAIRequest(rawJSON []byte) (*ir.UnifiedChatRequest, error) {
 	return req, nil
 }
 
-// parseResponsesAPIFields extracts Responses API specific fields into unified format.
 func parseResponsesAPIFields(root gjson.Result, req *ir.UnifiedChatRequest) {
-	if v := root.Get("instructions"); v.Exists() && v.String() != "" {
-		req.Instructions = v.String()
+	if v := root.Get("instructions").String(); v != "" {
+		req.Instructions = v
 		req.Messages = append(req.Messages, ir.Message{
-			Role: ir.RoleSystem, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: v.String()}},
+			Role: ir.RoleSystem, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: v}},
 		})
 	}
-	if input := root.Get("input"); input.Exists() {
-		if input.Type == gjson.String {
-			req.Messages = append(req.Messages, ir.Message{
-				Role: ir.RoleUser, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: input.String()}},
-			})
-		} else if input.IsArray() {
-			for _, item := range input.Array() {
-				if msg := parseResponsesInputItem(item); msg != nil {
-					req.Messages = append(req.Messages, *msg)
-				}
+	input := root.Get("input")
+	if input.Type == gjson.String {
+		req.Messages = append(req.Messages, ir.Message{
+			Role: ir.RoleUser, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: input.String()}},
+		})
+	} else {
+		for _, item := range input.Array() {
+			if msg := parseResponsesInputItem(item); msg != nil {
+				req.Messages = append(req.Messages, *msg)
 			}
 		}
 	}
-	if v := root.Get("previous_response_id"); v.Exists() {
-		req.PreviousResponseID = v.String()
-	}
-	if prompt := root.Get("prompt"); prompt.Exists() && prompt.IsObject() {
-		req.PromptID = prompt.Get("id").String()
-		req.PromptVersion = prompt.Get("version").String()
-		if vars := prompt.Get("variables"); vars.Exists() && vars.IsObject() {
-			req.PromptVariables = make(map[string]any)
-			vars.ForEach(func(key, value gjson.Result) bool {
-				req.PromptVariables[key.String()] = value.Value()
-				return true
-			})
+	req.PreviousResponseID = root.Get("previous_response_id").String()
+	if p := root.Get("prompt"); p.IsObject() {
+		req.PromptID, req.PromptVersion = p.Get("id").String(), p.Get("version").String()
+		if vars := p.Get("variables"); vars.IsObject() {
+			req.PromptVariables = vars.Value().(map[string]any)
 		}
 	}
-	if v := root.Get("prompt_cache_key"); v.Exists() {
-		req.PromptCacheKey = v.String()
-	}
+	req.PromptCacheKey = root.Get("prompt_cache_key").String()
 	if v := root.Get("store"); v.Exists() {
-		b := v.Bool()
-		req.Store = &b
+		req.Store = ir.Ptr(v.Bool())
 	}
 }
 
 func parseResponsesInputItem(item gjson.Result) *ir.Message {
-	itemType := item.Get("type").String()
-	if itemType == "" && item.Get("role").Exists() {
-		itemType = "message"
+	t := item.Get("type").String()
+	if t == "" && item.Get("role").Exists() {
+		t = "message"
 	}
-	switch itemType {
+	switch t {
 	case "message":
 		msg := &ir.Message{Role: ir.MapStandardRole(item.Get("role").String())}
-		content := item.Get("content")
-		if content.Type == gjson.String {
-			msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: content.String()})
-		} else if content.IsArray() {
-			for _, part := range content.Array() {
-				if cp := parseResponsesContentPart(part); cp != nil {
+		c := item.Get("content")
+		if c.Type == gjson.String {
+			msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: c.String()})
+		} else {
+			for _, p := range c.Array() {
+				if cp := parseResponsesContentPart(p); cp != nil {
 					msg.Content = append(msg.Content, *cp)
 				}
 			}
 		}
 		return msg
 	case "function_call":
-		return &ir.Message{
-			Role: ir.RoleAssistant,
-			ToolCalls: []ir.ToolCall{{
-				ID: item.Get("call_id").String(), Name: item.Get("name").String(), Args: item.Get("arguments").String(),
-			}},
-		}
+		return &ir.Message{Role: ir.RoleAssistant, ToolCalls: []ir.ToolCall{{ID: item.Get("call_id").String(), Name: item.Get("name").String(), Args: item.Get("arguments").String()}}}
 	case "function_call_output":
-		return &ir.Message{
-			Role: ir.RoleTool,
-			Content: []ir.ContentPart{{
-				Type: ir.ContentTypeToolResult,
-				ToolResult: &ir.ToolResultPart{
-					ToolCallID: item.Get("call_id").String(), Result: item.Get("output").String(),
-				},
-			}},
-		}
+		return &ir.Message{Role: ir.RoleTool, Content: []ir.ContentPart{{Type: ir.ContentTypeToolResult, ToolResult: &ir.ToolResultPart{ToolCallID: item.Get("call_id").String(), Result: item.Get("output").String()}}}}
 	}
 	return nil
 }
 
-func parseResponsesContentPart(part gjson.Result) *ir.ContentPart {
-	switch part.Get("type").String() {
+func parseResponsesContentPart(p gjson.Result) *ir.ContentPart {
+	switch p.Get("type").String() {
 	case "input_text", "output_text", "text":
-		if text := part.Get("text").String(); text != "" {
-			return &ir.ContentPart{Type: ir.ContentTypeText, Text: text}
+		if v := p.Get("text").String(); v != "" {
+			return &ir.ContentPart{Type: ir.ContentTypeText, Text: v}
 		}
 	case "input_image":
-		if url := part.Get("image_url").String(); url != "" {
-			if strings.HasPrefix(url, "data:") {
-				return &ir.ContentPart{Type: ir.ContentTypeImage, Image: parseDataURI(url)}
+		if v := p.Get("image_url.url").String(); v != "" {
+			if strings.HasPrefix(v, "data:") {
+				return &ir.ContentPart{Type: ir.ContentTypeImage, Image: parseDataURI(v)}
 			}
-			return &ir.ContentPart{Type: ir.ContentTypeImage, Image: &ir.ImagePart{URL: url}}
+			return &ir.ContentPart{Type: ir.ContentTypeImage, Image: &ir.ImagePart{URL: v}}
 		}
-		if fid := part.Get("file_id").String(); fid != "" {
-			return &ir.ContentPart{Type: ir.ContentTypeImage, Image: &ir.ImagePart{Data: fid}}
+		if v := p.Get("file_id").String(); v != "" {
+			return &ir.ContentPart{Type: ir.ContentTypeImage, Image: &ir.ImagePart{Data: v}}
 		}
 	case "input_file":
-		fp := &ir.FilePart{
-			FileID:   part.Get("file_id").String(),
-			FileURL:  part.Get("file_url").String(),
-			Filename: part.Get("filename").String(),
-			FileData: part.Get("file_data").String(),
-		}
-		// Extract MimeType from data URI if present (format: data:application/pdf;base64,...)
+		fp := &ir.FilePart{FileID: p.Get("file_id").String(), FileURL: p.Get("file_url").String(), Filename: p.Get("filename").String(), FileData: p.Get("file_data").String()}
 		if fp.FileData != "" && strings.HasPrefix(fp.FileData, "data:") {
-			if semicolonIdx := strings.Index(fp.FileData, ";"); semicolonIdx > 5 {
-				fp.MimeType = fp.FileData[5:semicolonIdx]
-				// Extract just the base64 data part
-				if commaIdx := strings.Index(fp.FileData, ","); commaIdx > 0 {
-					fp.FileData = fp.FileData[commaIdx+1:]
+			if s := strings.Index(fp.FileData, ";"); s > 5 {
+				fp.MimeType = fp.FileData[5:s]
+				if c := strings.Index(fp.FileData, ","); c > 0 {
+					fp.FileData = fp.FileData[c+1:]
 				}
 			}
 		}
@@ -399,60 +298,32 @@ func parseResponsesContentPart(part gjson.Result) *ir.ContentPart {
 	return nil
 }
 
-// ParseOpenAIResponse parses non-streaming response FROM OpenAI API into unified format.
-// Auto-detects format: Responses API has "output" array, Chat Completions has "choices" array.
 func ParseOpenAIResponse(rawJSON []byte) ([]ir.Message, *ir.Usage, error) {
 	root, err := ir.ParseAndValidateJSON(rawJSON)
 	if err != nil {
 		return nil, nil, err
 	}
 	usage := ir.ParseOpenAIUsage(root.Get("usage"))
-
-	if output := root.Get("output"); output.Exists() && output.IsArray() {
-		return parseResponsesAPIOutput(output, usage)
+	if v := root.Get("output"); v.IsArray() {
+		return parseResponsesAPIOutput(v, usage)
 	}
 
-	message := root.Get("choices.0.message")
-	if !message.Exists() {
+	m := root.Get("choices.0.message")
+	if !m.Exists() {
 		return nil, usage, nil
 	}
 	msg := ir.Message{Role: ir.RoleAssistant}
-
-	rf := ir.ParseReasoningFromJSON(message)
-	if rf.Text != "" {
-		var sig []byte
-		if rf.Signature != "" {
-			sig = []byte(rf.Signature)
-		}
-		msg.Content = append(msg.Content, ir.ContentPart{
-			Type:             ir.ContentTypeReasoning,
-			Reasoning:        rf.Text,
-			ThoughtSignature: sig,
-		})
+	if rf := ir.ParseReasoningFromJSON(m); rf.Text != "" {
+		msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeReasoning, Reasoning: rf.Text, ThoughtSignature: []byte(rf.Signature)})
 	}
-	if content := message.Get("content"); content.Exists() && content.String() != "" {
-		msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: content.String()})
+	if v := m.Get("content").String(); v != "" {
+		msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: v})
 	}
-
-	// Parse audio output for OpenAI audio models (gpt-4o-audio-preview)
-	if audio := message.Get("audio"); audio.Exists() && audio.IsObject() {
-		msg.Content = append(msg.Content, ir.ContentPart{
-			Type: ir.ContentTypeAudio,
-			Audio: &ir.AudioPart{
-				ID:         audio.Get("id").String(),
-				Data:       audio.Get("data").String(),
-				Transcript: audio.Get("transcript").String(),
-				ExpiresAt:  audio.Get("expires_at").Int(),
-			},
-		})
+	if v := m.Get("audio"); v.IsObject() {
+		msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeAudio, Audio: &ir.AudioPart{ID: v.Get("id").String(), Data: v.Get("data").String(), Transcript: v.Get("transcript").String(), ExpiresAt: v.Get("expires_at").Int()}})
 	}
-
-	msg.ToolCalls = append(msg.ToolCalls, ir.ParseOpenAIStyleToolCalls(message.Get("tool_calls").Array())...)
-
-	// Parse refusal message if model declined to respond
-	if refusal := message.Get("refusal").String(); refusal != "" {
-		msg.Refusal = refusal
-	}
+	msg.ToolCalls = append(msg.ToolCalls, ir.ParseOpenAIStyleToolCalls(m.Get("tool_calls").Array())...)
+	msg.Refusal = m.Get("refusal").String()
 
 	if len(msg.Content) == 0 && len(msg.ToolCalls) == 0 && msg.Refusal == "" {
 		return nil, usage, nil
@@ -461,518 +332,271 @@ func ParseOpenAIResponse(rawJSON []byte) ([]ir.Message, *ir.Usage, error) {
 }
 
 func parseResponsesAPIOutput(output gjson.Result, usage *ir.Usage) ([]ir.Message, *ir.Usage, error) {
-	var messages []ir.Message
+	var res []ir.Message
 	for _, item := range output.Array() {
 		switch item.Get("type").String() {
 		case "message":
-			msg := ir.Message{Role: ir.RoleAssistant}
+			m := ir.Message{Role: ir.RoleAssistant, Refusal: item.Get("refusal").String()}
 			for _, c := range item.Get("content").Array() {
 				if c.Get("type").String() == "output_text" {
-					msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: c.Get("text").String()})
+					m.Content = append(m.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: c.Get("text").String()})
 				}
 			}
-			// Parse refusal if present in message output
-			if refusal := item.Get("refusal").String(); refusal != "" {
-				msg.Refusal = refusal
-			}
-			if len(msg.Content) > 0 || msg.Refusal != "" {
-				messages = append(messages, msg)
+			if len(m.Content) > 0 || m.Refusal != "" {
+				res = append(res, m)
 			}
 		case "reasoning":
-			msg := ir.Message{Role: ir.RoleAssistant}
+			m := ir.Message{Role: ir.RoleAssistant}
 			for _, s := range item.Get("summary").Array() {
 				if s.Get("type").String() == "summary_text" {
-					msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeReasoning, Reasoning: s.Get("text").String()})
+					m.Content = append(m.Content, ir.ContentPart{Type: ir.ContentTypeReasoning, Reasoning: s.Get("text").String()})
 				}
 			}
-			if len(msg.Content) > 0 {
-				messages = append(messages, msg)
+			if len(m.Content) > 0 {
+				res = append(res, m)
 			}
 		case "function_call":
-			messages = append(messages, ir.Message{
-				Role: ir.RoleAssistant,
-				ToolCalls: []ir.ToolCall{{
-					ID: item.Get("call_id").String(), Name: item.Get("name").String(), Args: item.Get("arguments").String(),
-				}},
-			})
+			res = append(res, ir.Message{Role: ir.RoleAssistant, ToolCalls: []ir.ToolCall{{ID: item.Get("call_id").String(), Name: item.Get("name").String(), Args: item.Get("arguments").String()}}})
 		}
 	}
-	return messages, usage, nil
+	return res, usage, nil
 }
 
-// SSE prefix constants for zero-allocation comparison
-var (
-	sseEventPrefix = []byte("event:")
-	sseDataPrefix  = []byte("data:")
-	sseDone        = []byte("[DONE]")
-)
-
-// ParseOpenAIChunk parses streaming SSE chunk FROM OpenAI API into events.
-// Handles both formats:
-// - Chat Completions: "data: {...}" with choices[].delta
-// - Responses API: "event: response.xxx\ndata: {...}" with semantic event types
-// Optimized: uses bytes operations to avoid string allocations in hot path.
 func ParseOpenAIChunk(rawJSON []byte) ([]ir.UnifiedEvent, error) {
 	raw := bytes.TrimSpace(rawJSON)
 	if len(raw) == 0 {
 		return nil, nil
 	}
-
-	var eventType string
+	var et string
 	data := raw
-
-	// Parse "event: xxx\ndata: yyy" format (Responses API)
-	if bytes.HasPrefix(raw, sseEventPrefix) {
-		if idx := bytes.IndexByte(raw, '\n'); idx > 0 {
-			eventType = string(bytes.TrimSpace(raw[6:idx])) // Skip "event:"
-			data = bytes.TrimSpace(raw[idx+1:])
+	if bytes.HasPrefix(raw, []byte("event:")) {
+		if i := bytes.IndexByte(raw, '\n'); i > 0 {
+			et, data = string(bytes.TrimSpace(raw[6:i])), bytes.TrimSpace(raw[i+1:])
 		}
 	}
-
-	// Strip "data:" or "data: " prefix
-	if bytes.HasPrefix(data, sseDataPrefix) {
-		data = bytes.TrimSpace(data[5:]) // Skip "data:"
+	if bytes.HasPrefix(data, []byte("data:")) {
+		data = bytes.TrimSpace(data[5:])
 	}
-
 	if len(data) == 0 {
 		return nil, nil
 	}
-	if bytes.Equal(data, sseDone) {
+	if bytes.Equal(data, []byte("[DONE]")) {
 		return []ir.UnifiedEvent{{Type: ir.EventTypeFinish, FinishReason: ir.FinishReasonStop}}, nil
 	}
-	if !gjson.ValidBytes(data) {
-		return nil, nil
-	}
 	root := gjson.ParseBytes(data)
-
-	if eventType == "" {
-		eventType = root.Get("type").String()
+	if et == "" {
+		et = root.Get("type").String()
 	}
-	if eventType != "" && strings.HasPrefix(eventType, "response.") {
-		return parseResponsesStreamEvent(eventType, root)
+	if et != "" && strings.HasPrefix(et, "response.") {
+		return parseResponsesStreamEvent(et, root)
 	}
 
-	events := make([]ir.UnifiedEvent, 0, 2)
 	choice := root.Get("choices.0")
 	if !choice.Exists() {
 		if u := root.Get("usage"); u.Exists() {
-			usage := &ir.Usage{
-				PromptTokens: u.Get("prompt_tokens").Int(), CompletionTokens: u.Get("completion_tokens").Int(), TotalTokens: u.Get("total_tokens").Int(),
-			}
-			if v := u.Get("prompt_tokens_details.cached_tokens"); v.Exists() {
-				usage.CachedTokens = v.Int()
-				if usage.PromptTokensDetails == nil {
-					usage.PromptTokensDetails = &ir.PromptTokensDetails{}
-				}
-				usage.PromptTokensDetails.CachedTokens = v.Int()
-			}
-			if v := u.Get("prompt_tokens_details.audio_tokens"); v.Exists() {
-				usage.AudioTokens = v.Int()
-				if usage.PromptTokensDetails == nil {
-					usage.PromptTokensDetails = &ir.PromptTokensDetails{}
-				}
-				usage.PromptTokensDetails.AudioTokens = v.Int()
-			}
-			if v := u.Get("completion_tokens_details.reasoning_tokens"); v.Exists() {
-				usage.ThoughtsTokenCount = int32(v.Int())
-				if usage.CompletionTokensDetails == nil {
-					usage.CompletionTokensDetails = &ir.CompletionTokensDetails{}
-				}
-				usage.CompletionTokensDetails.ReasoningTokens = v.Int()
-			}
-			if v := u.Get("completion_tokens_details.audio_tokens"); v.Exists() {
-				if usage.CompletionTokensDetails == nil {
-					usage.CompletionTokensDetails = &ir.CompletionTokensDetails{}
-				}
-				usage.CompletionTokensDetails.AudioTokens = v.Int()
-			}
-			if v := u.Get("completion_tokens_details.accepted_prediction_tokens"); v.Exists() {
-				usage.AcceptedPredictionTokens = v.Int()
-				if usage.CompletionTokensDetails == nil {
-					usage.CompletionTokensDetails = &ir.CompletionTokensDetails{}
-				}
-				usage.CompletionTokensDetails.AcceptedPredictionTokens = v.Int()
-			}
-			if v := u.Get("completion_tokens_details.rejected_prediction_tokens"); v.Exists() {
-				usage.RejectedPredictionTokens = v.Int()
-				if usage.CompletionTokensDetails == nil {
-					usage.CompletionTokensDetails = &ir.CompletionTokensDetails{}
-				}
-				usage.CompletionTokensDetails.RejectedPredictionTokens = v.Int()
-			}
-
-			events = append(events, ir.UnifiedEvent{
-				Type:              ir.EventTypeFinish,
-				Usage:             usage,
-				SystemFingerprint: root.Get("system_fingerprint").String(),
-			})
+			usage := ir.ParseOpenAIUsage(u)
+			return []ir.UnifiedEvent{{Type: ir.EventTypeFinish, Usage: usage, SystemFingerprint: root.Get("system_fingerprint").String()}}, nil
 		}
-		return events, nil
+		return nil, nil
 	}
 
-	delta := choice.Get("delta")
-	if content := delta.Get("content"); content.Exists() && content.String() != "" {
-		events = append(events, ir.UnifiedEvent{Type: ir.EventTypeToken, Content: content.String()})
+	var evs []ir.UnifiedEvent
+	d := choice.Get("delta")
+	if v := d.Get("content").String(); v != "" {
+		evs = append(evs, ir.UnifiedEvent{Type: ir.EventTypeToken, Content: v})
 	}
-	if refusal := delta.Get("refusal"); refusal.Exists() && refusal.String() != "" {
-		events = append(events, ir.UnifiedEvent{Type: ir.EventTypeToken, Refusal: refusal.String()})
+	if v := d.Get("refusal").String(); v != "" {
+		evs = append(evs, ir.UnifiedEvent{Type: ir.EventTypeToken, Refusal: v})
 	}
-
-	// Parse audio delta for streaming audio output (gpt-4o-audio-preview)
-	if audio := delta.Get("audio"); audio.Exists() && audio.IsObject() {
-		audioPart := &ir.AudioPart{}
-		if id := audio.Get("id"); id.Exists() {
-			audioPart.ID = id.String()
-		}
-		if data := audio.Get("data"); data.Exists() {
-			audioPart.Data = data.String()
-		}
-		if transcript := audio.Get("transcript"); transcript.Exists() {
-			audioPart.Transcript = transcript.String()
-		}
-		if expiresAt := audio.Get("expires_at"); expiresAt.Exists() {
-			audioPart.ExpiresAt = expiresAt.Int()
-		}
-		events = append(events, ir.UnifiedEvent{Type: ir.EventTypeAudio, Audio: audioPart})
+	if v := d.Get("audio"); v.IsObject() {
+		evs = append(evs, ir.UnifiedEvent{Type: ir.EventTypeAudio, Audio: &ir.AudioPart{ID: v.Get("id").String(), Data: v.Get("data").String(), Transcript: v.Get("transcript").String(), ExpiresAt: v.Get("expires_at").Int()}})
+	}
+	if rf := ir.ParseReasoningFromJSON(d); rf.Text != "" {
+		evs = append(evs, ir.UnifiedEvent{Type: ir.EventTypeReasoning, Reasoning: rf.Text, ThoughtSignature: []byte(rf.Signature)})
+	}
+	for _, tc := range d.Get("tool_calls").Array() {
+		evs = append(evs, ir.UnifiedEvent{Type: ir.EventTypeToolCall, ToolCall: &ir.ToolCall{ID: tc.Get("id").String(), Name: tc.Get("function.name").String(), Args: tc.Get("function.arguments").String()}, ToolCallIndex: int(tc.Get("index").Int())})
 	}
 
-	if rf := ir.ParseReasoningFromJSON(delta); rf.Text != "" {
-		var sig []byte
-		if rf.Signature != "" {
-			sig = []byte(rf.Signature)
+	if fr := choice.Get("finish_reason").String(); fr != "" {
+		ev := ir.UnifiedEvent{Type: ir.EventTypeFinish, FinishReason: ir.MapOpenAIFinishReason(fr), SystemFingerprint: root.Get("system_fingerprint").String()}
+		if v := choice.Get("logprobs"); v.Exists() {
+			ev.Logprobs = v.Value()
 		}
-		events = append(events, ir.UnifiedEvent{
-			Type:             ir.EventTypeReasoning,
-			Reasoning:        rf.Text,
-			ThoughtSignature: sig,
-		})
-	}
-	for _, tc := range delta.Get("tool_calls").Array() {
-		tcIndex := int(tc.Get("index").Int())
-		events = append(events, ir.UnifiedEvent{
-			Type: ir.EventTypeToolCall,
-			ToolCall: &ir.ToolCall{
-				ID: tc.Get("id").String(), Name: tc.Get("function.name").String(), Args: tc.Get("function.arguments").String(),
-			},
-			ToolCallIndex: tcIndex,
-		})
-	}
-
-	finishReason := choice.Get("finish_reason")
-	if finishReason.Exists() && finishReason.String() != "" {
-		event := ir.UnifiedEvent{Type: ir.EventTypeFinish, FinishReason: ir.MapOpenAIFinishReason(finishReason.String())}
-		if logprobs := choice.Get("logprobs"); logprobs.Exists() {
-			event.Logprobs = logprobs.Value()
+		if v := choice.Get("content_filter_results"); v.Exists() {
+			ev.ContentFilter = v.Value()
 		}
-		if cfr := choice.Get("content_filter_results"); cfr.Exists() {
-			event.ContentFilter = cfr.Value()
-		}
-		event.SystemFingerprint = root.Get("system_fingerprint").String()
-		events = append(events, event)
-	} else {
-		if len(events) > 0 {
-			events[0].SystemFingerprint = root.Get("system_fingerprint").String()
-			if logprobs := choice.Get("logprobs"); logprobs.Exists() {
-				events[0].Logprobs = logprobs.Value()
-			}
+		evs = append(evs, ev)
+	} else if len(evs) > 0 {
+		evs[0].SystemFingerprint = root.Get("system_fingerprint").String()
+		if v := choice.Get("logprobs"); v.Exists() {
+			evs[0].Logprobs = v.Value()
 		}
 	}
-
-	return events, nil
+	return evs, nil
 }
 
-func parseResponsesStreamEvent(eventType string, root gjson.Result) ([]ir.UnifiedEvent, error) {
-	events := make([]ir.UnifiedEvent, 0, 2)
-	switch eventType {
+func parseResponsesStreamEvent(et string, root gjson.Result) ([]ir.UnifiedEvent, error) {
+	switch et {
 	case "response.output_text.delta":
-		if delta := root.Get("delta"); delta.Exists() && delta.String() != "" {
-			events = append(events, ir.UnifiedEvent{Type: ir.EventTypeToken, Content: delta.String()})
+		if v := root.Get("delta").String(); v != "" {
+			return []ir.UnifiedEvent{{Type: ir.EventTypeToken, Content: v}}, nil
 		}
 	case "response.reasoning_summary_text.delta":
-		if text := root.Get("text"); text.Exists() && text.String() != "" {
-			events = append(events, ir.UnifiedEvent{Type: ir.EventTypeReasoningSummary, ReasoningSummary: text.String()})
+		if v := root.Get("text").String(); v != "" {
+			return []ir.UnifiedEvent{{Type: ir.EventTypeReasoningSummary, ReasoningSummary: v}}, nil
 		}
 	case "response.function_call_arguments.delta":
-		if delta := root.Get("delta"); delta.Exists() {
-			events = append(events, ir.UnifiedEvent{
-				Type:          ir.EventTypeToolCallDelta,
-				ToolCall:      &ir.ToolCall{ID: root.Get("item_id").String(), Args: delta.String()},
-				ToolCallIndex: int(root.Get("output_index").Int()),
-			})
-		}
+		return []ir.UnifiedEvent{{Type: ir.EventTypeToolCallDelta, ToolCall: &ir.ToolCall{ID: root.Get("item_id").String(), Args: root.Get("delta").String()}, ToolCallIndex: int(root.Get("output_index").Int())}}, nil
 	case "response.function_call_arguments.done":
-		events = append(events, ir.UnifiedEvent{
-			Type: ir.EventTypeToolCall,
-			ToolCall: &ir.ToolCall{
-				ID: root.Get("item_id").String(), Name: root.Get("name").String(), Args: root.Get("arguments").String(),
-			},
-			ToolCallIndex: int(root.Get("output_index").Int()),
-		})
+		return []ir.UnifiedEvent{{Type: ir.EventTypeToolCall, ToolCall: &ir.ToolCall{ID: root.Get("item_id").String(), Name: root.Get("name").String(), Args: root.Get("arguments").String()}, ToolCallIndex: int(root.Get("output_index").Int())}}, nil
 	case "response.web_search_call.in_progress":
-		// Web search tool started - emit tool call event
-		events = append(events, ir.UnifiedEvent{
-			Type: ir.EventTypeToolCall,
-			ToolCall: &ir.ToolCall{
-				ID:   root.Get("item_id").String(),
-				Name: "web_search",
-				Args: "{}",
-			},
-		})
-
-	case "response.web_search_call.completed":
-		// Web search completed - could emit result or just ignore
-		return nil, nil
-
+		return []ir.UnifiedEvent{{Type: ir.EventTypeToolCall, ToolCall: &ir.ToolCall{ID: root.Get("item_id").String(), Name: "web_search", Args: "{}"}}}, nil
 	case "response.refusal.delta":
-		if delta := root.Get("delta").String(); delta != "" {
-			events = append(events, ir.UnifiedEvent{
-				Type:    ir.EventTypeToken,
-				Refusal: delta,
-			})
+		if v := root.Get("delta").String(); v != "" {
+			return []ir.UnifiedEvent{{Type: ir.EventTypeToken, Refusal: v}}, nil
 		}
-
 	case "response.audio_transcript.delta":
-		if delta := root.Get("delta").String(); delta != "" {
-			events = append(events, ir.UnifiedEvent{
-				Type: ir.EventTypeAudio,
-				Audio: &ir.AudioPart{
-					Transcript: delta,
-				},
-			})
+		if v := root.Get("delta").String(); v != "" {
+			return []ir.UnifiedEvent{{Type: ir.EventTypeAudio, Audio: &ir.AudioPart{Transcript: v}}}, nil
 		}
-
 	case "response.completed":
-		event := ir.UnifiedEvent{Type: ir.EventTypeFinish, FinishReason: ir.FinishReasonStop}
+		ev := ir.UnifiedEvent{Type: ir.EventTypeFinish, FinishReason: ir.FinishReasonStop}
 		if u := root.Get("response.usage"); u.Exists() {
-			event.Usage = &ir.Usage{
-				PromptTokens: u.Get("input_tokens").Int(), CompletionTokens: u.Get("output_tokens").Int(), TotalTokens: u.Get("total_tokens").Int(),
-			}
-			if v := u.Get("input_tokens_details.cached_tokens"); v.Exists() {
-				event.Usage.CachedTokens = v.Int()
-				if event.Usage.PromptTokensDetails == nil {
-					event.Usage.PromptTokensDetails = &ir.PromptTokensDetails{}
-				}
-				event.Usage.PromptTokensDetails.CachedTokens = v.Int()
-			}
-			if v := u.Get("output_tokens_details.reasoning_tokens"); v.Exists() {
-				event.Usage.ThoughtsTokenCount = int32(v.Int())
-				if event.Usage.CompletionTokensDetails == nil {
-					event.Usage.CompletionTokensDetails = &ir.CompletionTokensDetails{}
-				}
-				event.Usage.CompletionTokensDetails.ReasoningTokens = v.Int()
-			}
-			if v := u.Get("output_tokens_details.audio_tokens"); v.Exists() {
-				if event.Usage.CompletionTokensDetails == nil {
-					event.Usage.CompletionTokensDetails = &ir.CompletionTokensDetails{}
-				}
-				event.Usage.CompletionTokensDetails.AudioTokens = v.Int()
-			}
+			ev.Usage = ir.ParseOpenAIUsage(u)
 		}
-		events = append(events, event)
+		return []ir.UnifiedEvent{ev}, nil
 	case "error":
-		events = append(events, ir.UnifiedEvent{Type: ir.EventTypeError, FinishReason: ir.FinishReasonError})
+		return []ir.UnifiedEvent{{Type: ir.EventTypeError, FinishReason: ir.FinishReasonError}}, nil
 	}
-	return events, nil
+	return nil, nil
 }
 
 func parseOpenAIMessage(m gjson.Result) ir.Message {
-	roleStr := m.Get("role").String()
-	msg := ir.Message{Role: ir.MapStandardRole(roleStr)}
-
-	// Parse cache_control if present
-	if cc := m.Get("cache_control"); cc.Exists() && cc.IsObject() {
-		msg.CacheControl = &ir.CacheControl{
-			Type: cc.Get("type").String(),
-		}
-		if ttl := cc.Get("ttl"); ttl.Exists() {
-			ttlVal := ttl.Int()
-			msg.CacheControl.TTL = &ttlVal
+	role := m.Get("role").String()
+	msg := ir.Message{Role: ir.MapStandardRole(role)}
+	if cc := m.Get("cache_control"); cc.IsObject() {
+		msg.CacheControl = &ir.CacheControl{Type: cc.Get("type").String()}
+		if v := cc.Get("ttl"); v.Exists() {
+			msg.CacheControl.TTL = ir.Ptr(v.Int())
 		}
 	}
-
-	if roleStr == "assistant" {
+	if role == "assistant" {
 		if rf := ir.ParseReasoningFromJSON(m); rf.Text != "" {
-			var sig []byte
-			if rf.Signature != "" {
-				sig = []byte(rf.Signature)
-			}
-			msg.Content = append(msg.Content, ir.ContentPart{
-				Type:             ir.ContentTypeReasoning,
-				Reasoning:        rf.Text,
-				ThoughtSignature: sig,
-			})
+			msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeReasoning, Reasoning: rf.Text, ThoughtSignature: []byte(rf.Signature)})
 		}
 	}
-
-	content := m.Get("content")
-	if content.Type == gjson.String && roleStr != "tool" {
-		msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: content.String()})
-	} else if content.IsArray() {
-		for _, item := range content.Array() {
-			if part := parseOpenAIContentPart(item, &msg); part != nil {
-				msg.Content = append(msg.Content, *part)
+	c := m.Get("content")
+	if c.Type == gjson.String && role != "tool" {
+		msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeText, Text: c.String()})
+	} else {
+		for _, item := range c.Array() {
+			if p := parseOpenAIContentPart(item, &msg); p != nil {
+				msg.Content = append(msg.Content, *p)
 			}
 		}
 	}
-
-	if roleStr == "assistant" {
+	if role == "assistant" {
 		for _, tc := range m.Get("tool_calls").Array() {
 			if tc.Get("type").String() == "function" {
-				toolCall := ir.ToolCall{
-					ID:   tc.Get("id").String(),
-					Name: tc.Get("function.name").String(),
-					Args: tc.Get("function.arguments").String(),
-				}
-				// Extract thought_signature from extra_content (Gemini 3 compatibility)
+				t := ir.ToolCall{ID: tc.Get("id").String(), Name: tc.Get("function.name").String(), Args: tc.Get("function.arguments").String()}
 				if sig := tc.Get("extra_content.google.thought_signature").String(); sig != "" {
-					toolCall.ThoughtSignature = []byte(sig)
+					t.ThoughtSignature = []byte(sig)
 				}
-				msg.ToolCalls = append(msg.ToolCalls, toolCall)
+				msg.ToolCalls = append(msg.ToolCalls, t)
 			}
 		}
 	}
-
-	if roleStr == "tool" {
-		toolCallID := m.Get("tool_call_id").String()
-		if toolCallID == "" {
-			toolCallID = m.Get("tool_use_id").String()
+	if role == "tool" {
+		id := m.Get("tool_call_id").String()
+		if id == "" {
+			id = m.Get("tool_use_id").String()
 		}
-		msg.Content = append(msg.Content, ir.ContentPart{
-			Type: ir.ContentTypeToolResult,
-			ToolResult: &ir.ToolResultPart{
-				ToolCallID: toolCallID, Result: ir.SanitizeText(extractContentString(content)),
-			},
-		})
+		msg.Content = append(msg.Content, ir.ContentPart{Type: ir.ContentTypeToolResult, ToolResult: &ir.ToolResultPart{ToolCallID: id, Result: ir.SanitizeText(extractContentString(c))}})
 	}
 	return msg
 }
 
 func parseOpenAIContentPart(item gjson.Result, msg *ir.Message) *ir.ContentPart {
-	switch item.Get("type").String() {
+	switch t := item.Get("type").String(); t {
 	case "text":
-		if text := item.Get("text").String(); text != "" {
-			return &ir.ContentPart{Type: ir.ContentTypeText, Text: text}
+		if v := item.Get("text").String(); v != "" {
+			return &ir.ContentPart{Type: ir.ContentTypeText, Text: v}
 		}
-	case "thinking":
-		// Claude Extended Thinking: Parse thinking blocks from history
-		if text := item.Get("thinking").String(); text != "" {
-			var sig []byte
-			if s := item.Get("signature").String(); s != "" {
-				sig = []byte(s)
-			}
-			return &ir.ContentPart{
-				Type:             ir.ContentTypeReasoning,
-				Reasoning:        text,
-				ThoughtSignature: sig,
-			}
+	case "thinking", "reasoning":
+		textKey := "thinking"
+		if t == "reasoning" {
+			textKey = "text"
+		}
+		if v := item.Get(textKey).String(); v != "" {
+			return &ir.ContentPart{Type: ir.ContentTypeReasoning, Reasoning: v, ThoughtSignature: []byte(item.Get("signature").String())}
 		}
 	case "redacted_thinking":
-		// Claude Extended Thinking: Redacted thinking blocks (encrypted content preserved for round-trip)
-		return &ir.ContentPart{
-			Type:         ir.ContentTypeRedactedThinking,
-			RedactedData: item.Get("data").String(),
-		}
+		return &ir.ContentPart{Type: ir.ContentTypeRedactedThinking, RedactedData: item.Get("data").String()}
 	case "image_url":
-		imageURL := item.Get("image_url")
-		if imageURL.Exists() {
-			url := imageURL.Get("url").String()
-			detail := imageURL.Get("detail").String()
-			if img := parseDataURI(url); img != nil {
-				img.Detail = detail
-				return &ir.ContentPart{Type: ir.ContentTypeImage, Image: img}
-			}
-			if url != "" {
-				return &ir.ContentPart{Type: ir.ContentTypeImage, Image: &ir.ImagePart{URL: url, Detail: detail}}
-			}
+		u := item.Get("image_url.url").String()
+		if img := parseDataURI(u); img != nil {
+			img.Detail = item.Get("image_url.detail").String()
+			return &ir.ContentPart{Type: ir.ContentTypeImage, Image: img}
+		}
+		if u != "" {
+			return &ir.ContentPart{Type: ir.ContentTypeImage, Image: &ir.ImagePart{URL: u, Detail: item.Get("image_url.detail").String()}}
 		}
 	case "image":
-		mediaType := item.Get("source.media_type").String()
-		if mediaType == "" {
-			mediaType = "image/png"
+		mt := item.Get("source.media_type").String()
+		if mt == "" {
+			mt = "image/png"
 		}
-		if data := item.Get("source.data").String(); data != "" {
-			return &ir.ContentPart{Type: ir.ContentTypeImage, Image: &ir.ImagePart{MimeType: mediaType, Data: data}}
+		if d := item.Get("source.data").String(); d != "" {
+			return &ir.ContentPart{Type: ir.ContentTypeImage, Image: &ir.ImagePart{MimeType: mt, Data: d}}
 		}
 	case "input_audio":
-		// OpenAI audio input for gpt-4o-audio-preview models
-		inputAudio := item.Get("input_audio")
-		if inputAudio.Exists() {
-			return &ir.ContentPart{
-				Type: ir.ContentTypeAudio,
-				Audio: &ir.AudioPart{
-					Data:   inputAudio.Get("data").String(),
-					Format: inputAudio.Get("format").String(),
-				},
-			}
+		if v := item.Get("input_audio"); v.Exists() {
+			return &ir.ContentPart{Type: ir.ContentTypeAudio, Audio: &ir.AudioPart{Data: v.Get("data").String(), Format: v.Get("format").String()}}
 		}
 	case "file":
-		filename := item.Get("file.filename").String()
-		fileData := item.Get("file.file_data").String()
-		fileID := item.Get("file.file_id").String()
-		fileURL := item.Get("file.url").String()
-		if filename != "" || fileData != "" || fileID != "" || fileURL != "" {
+		fn, fd, fid, fu := item.Get("file.filename").String(), item.Get("file.file_data").String(), item.Get("file.file_id").String(), item.Get("file.url").String()
+		if fn != "" || fd != "" || fid != "" || fu != "" {
 			ext := ""
-			if idx := strings.LastIndex(filename, "."); idx >= 0 && idx < len(filename)-1 {
-				ext = filename[idx+1:]
+			if i := strings.LastIndex(fn, "."); i >= 0 && i < len(fn)-1 {
+				ext = fn[i+1:]
 			}
-			mimeType := misc.MimeTypes[ext]
-			// Check if it's an image type
-			if mimeType != "" && strings.HasPrefix(mimeType, "image/") && fileData != "" {
-				return &ir.ContentPart{Type: ir.ContentTypeImage, Image: &ir.ImagePart{MimeType: mimeType, Data: fileData}}
+			mt := misc.MimeTypes[ext]
+			if mt != "" && strings.HasPrefix(mt, "image/") && fd != "" {
+				return &ir.ContentPart{Type: ir.ContentTypeImage, Image: &ir.ImagePart{MimeType: mt, Data: fd}}
 			}
-			// Otherwise treat as file/document
-			return &ir.ContentPart{
-				Type: ir.ContentTypeFile,
-				File: &ir.FilePart{
-					FileID:   fileID,
-					FileURL:  fileURL,
-					Filename: filename,
-					FileData: fileData,
-					MimeType: mimeType,
-				},
-			}
+			return &ir.ContentPart{Type: ir.ContentTypeFile, File: &ir.FilePart{FileID: fid, FileURL: fu, Filename: fn, FileData: fd, MimeType: mt}}
 		}
 	case "tool_use":
-		argsRaw := item.Get("input").Raw
-		if argsRaw == "" {
-			argsRaw = "{}"
+		args := item.Get("input").Raw
+		if args == "" {
+			args = "{}"
 		}
-		msg.ToolCalls = append(msg.ToolCalls, ir.ToolCall{
-			ID: item.Get("id").String(), Name: item.Get("name").String(), Args: argsRaw,
-		})
+		msg.ToolCalls = append(msg.ToolCalls, ir.ToolCall{ID: item.Get("id").String(), Name: item.Get("name").String(), Args: args})
 	case "tool_result":
 		msg.Role = ir.RoleTool
-		return &ir.ContentPart{
-			Type: ir.ContentTypeToolResult,
-			ToolResult: &ir.ToolResultPart{
-				ToolCallID: item.Get("tool_use_id").String(), Result: ir.SanitizeText(extractContentString(item.Get("content"))),
-			},
-		}
+		return &ir.ContentPart{Type: ir.ContentTypeToolResult, ToolResult: &ir.ToolResultPart{ToolCallID: item.Get("tool_use_id").String(), Result: ir.SanitizeText(extractContentString(item.Get("content")))}}
 	}
 	return nil
 }
 
 func parseOpenAITool(t gjson.Result) *ir.ToolDefinition {
-	var name, description string
-	var paramsResult gjson.Result
-
+	var n, d string
+	var pr gjson.Result
 	if t.Get("type").String() == "function" {
 		fn := t.Get("function")
-		name, description, paramsResult = fn.Get("name").String(), fn.Get("description").String(), fn.Get("parameters")
+		n, d, pr = fn.Get("name").String(), fn.Get("description").String(), fn.Get("parameters")
 	} else if t.Get("name").Exists() {
-		name, description, paramsResult = t.Get("name").String(), t.Get("description").String(), t.Get("input_schema")
+		n, d, pr = t.Get("name").String(), t.Get("description").String(), t.Get("input_schema")
 	}
-
-	if name == "" {
+	if n == "" {
 		return nil
 	}
-
 	var params map[string]any
-	if paramsResult.Exists() && paramsResult.IsObject() {
-		if json.Unmarshal([]byte(paramsResult.Raw), &params) == nil {
+	if pr.IsObject() {
+		if json.Unmarshal([]byte(pr.Raw), &params) == nil {
 			params = ir.CleanJsonSchema(params)
-			// Ensure type is "object" - some SDKs send "None" or omit type
-			if typeVal, ok := params["type"].(string); !ok || typeVal == "" || typeVal == "None" {
+			if tv, ok := params["type"].(string); !ok || tv == "" || tv == "None" {
 				params["type"] = "object"
 			}
 		}
@@ -980,80 +604,68 @@ func parseOpenAITool(t gjson.Result) *ir.ToolDefinition {
 	if params == nil {
 		params = map[string]any{"type": "object", "properties": map[string]any{}}
 	}
-	return &ir.ToolDefinition{Name: name, Description: description, Parameters: params}
+	return &ir.ToolDefinition{Name: n, Description: d, Parameters: params}
 }
 
 func parseThinkingConfig(root gjson.Result) *ir.ThinkingConfig {
-	var thinking *ir.ThinkingConfig
+	var tc *ir.ThinkingConfig
 	if re := root.Get("reasoning_effort"); re.Exists() {
-		thinking = &ir.ThinkingConfig{Effort: ir.ReasoningEffort(re.String())}
 		budget, include := ir.EffortToBudget(re.String())
-		b := int32(budget)
-		thinking.ThinkingBudget = &b
-		thinking.IncludeThoughts = include
+		tc = &ir.ThinkingConfig{Effort: ir.ReasoningEffort(re.String()), ThinkingBudget: ir.Ptr(int32(budget)), IncludeThoughts: include}
 	}
-	if reasoning := root.Get("reasoning"); reasoning.Exists() && reasoning.IsObject() {
-		if thinking == nil {
-			thinking = &ir.ThinkingConfig{}
+	if r := root.Get("reasoning"); r.IsObject() {
+		if tc == nil {
+			tc = &ir.ThinkingConfig{}
 		}
-		if effort := reasoning.Get("effort"); effort.Exists() {
-			thinking.Effort = ir.ReasoningEffort(effort.String())
-			budget, include := ir.EffortToBudget(effort.String())
-			b := int32(budget)
-			thinking.ThinkingBudget = &b
-			thinking.IncludeThoughts = include
+		if e := r.Get("effort"); e.Exists() {
+			budget, include := ir.EffortToBudget(e.String())
+			tc.Effort, tc.ThinkingBudget, tc.IncludeThoughts = ir.ReasoningEffort(e.String()), ir.Ptr(int32(budget)), include
 		}
-		if summary := reasoning.Get("summary"); summary.Exists() {
-			thinking.Summary = summary.String()
+		if s := r.Get("summary"); s.Exists() {
+			tc.Summary = s.String()
 		}
 	}
-
-	// Cherry Studio extension: extra_body.google.thinking_config
-	if tc := root.Get("extra_body.google.thinking_config"); tc.Exists() && tc.IsObject() {
-		if thinking == nil {
-			thinking = &ir.ThinkingConfig{}
+	if v := root.Get("extra_body.google.thinking_config"); v.IsObject() {
+		if tc == nil {
+			tc = &ir.ThinkingConfig{}
 		}
-		if v := tc.Get("thinkingBudget"); v.Exists() {
-			b := int32(v.Int())
-			thinking.ThinkingBudget = &b
-		} else if v := tc.Get("thinking_budget"); v.Exists() {
-			b := int32(v.Int())
-			thinking.ThinkingBudget = &b
+		if b := v.Get("thinkingBudget"); b.Exists() {
+			tc.ThinkingBudget = ir.Ptr(int32(b.Int()))
+		} else if b := v.Get("thinking_budget"); b.Exists() {
+			tc.ThinkingBudget = ir.Ptr(int32(b.Int()))
 		}
-		if v := tc.Get("includeThoughts"); v.Exists() {
-			thinking.IncludeThoughts = v.Bool()
-		} else if v := tc.Get("include_thoughts"); v.Exists() {
-			thinking.IncludeThoughts = v.Bool()
+		if i := v.Get("includeThoughts"); i.Exists() {
+			tc.IncludeThoughts = i.Bool()
+		} else if i := v.Get("include_thoughts"); i.Exists() {
+			tc.IncludeThoughts = i.Bool()
 		}
 	}
-	return thinking
+	return tc
 }
 
-// parseDataURI extracts mime type and base64 data from data URI (format: data:image/png;base64,<data>).
 func parseDataURI(url string) *ir.ImagePart {
 	if !strings.HasPrefix(url, "data:") {
 		return nil
 	}
-	parts := strings.SplitN(url, ",", 2)
-	if len(parts) != 2 {
+	p := strings.SplitN(url, ",", 2)
+	if len(p) != 2 {
 		return nil
 	}
-	mime := "image/jpeg"
-	if idx := strings.Index(parts[0], ";"); idx > 5 {
-		mime = parts[0][5:idx]
+	m := "image/jpeg"
+	if i := strings.Index(p[0], ";"); i > 5 {
+		m = p[0][5:i]
 	}
-	return &ir.ImagePart{MimeType: mime, Data: parts[1]}
+	return &ir.ImagePart{MimeType: m, Data: p[1]}
 }
 
-// extractContentString extracts text from content (string or array of text blocks).
-func extractContentString(content gjson.Result) string {
-	if content.Type == gjson.String {
-		return content.String()
+func extractContentString(c gjson.Result) string {
+	if c.Type == gjson.String {
+		return c.String()
 	}
-	for _, item := range content.Array() {
-		if item.Get("type").String() == "text" {
-			return item.Get("text").String()
+	for _, i := range c.Array() {
+		if i.Get("type").String() == "text" {
+			return i.Get("text").String()
 		}
 	}
-	return content.Raw
+	return c.Raw
 }

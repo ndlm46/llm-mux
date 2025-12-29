@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 
 	"github.com/nghyane/llm-mux/internal/json"
@@ -15,29 +14,21 @@ import (
 	"github.com/nghyane/llm-mux/internal/util"
 )
 
-// GeminiProvider handles conversion to Gemini AI Studio API format.
 type GeminiProvider struct{}
 
 func (p *GeminiProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
-	root := map[string]any{
-		"contents": []any{},
-	}
-
+	root := map[string]any{"contents": []any{}}
 	if err := p.applyMessages(root, req); err != nil {
 		return nil, err
 	}
-
 	if err := p.applyGenerationConfig(root, req); err != nil {
 		return nil, err
 	}
-
 	if err := p.applyTools(root, req); err != nil {
 		return nil, err
 	}
-
 	p.applySafetySettings(root, req)
 
-	// Restore Gemini-specific fields from Metadata (passthrough)
 	if req.Metadata != nil {
 		if v, ok := req.Metadata[ir.MetaGeminiCachedContent]; ok {
 			root["cachedContent"] = v
@@ -47,106 +38,79 @@ func (p *GeminiProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, err
 		}
 	}
 
-	// Handle gemini-2.5-flash-image-preview aspect ratio
 	if req.Model == "gemini-2.5-flash-image-preview" && req.ImageConfig != nil && req.ImageConfig.AspectRatio != "" {
 		p.fixImageAspectRatioForPreview(root, req.ImageConfig.AspectRatio)
 	}
-
 	return json.Marshal(root)
 }
 
 func (p *GeminiProvider) applyGenerationConfig(root map[string]any, req *ir.UnifiedChatRequest) error {
-	genConfig := make(map[string]any)
-
+	gc := make(map[string]any)
 	if req.Temperature != nil {
-		genConfig["temperature"] = *req.Temperature
+		gc["temperature"] = *req.Temperature
 	}
 	if req.TopP != nil {
-		genConfig["topP"] = *req.TopP
+		gc["topP"] = *req.TopP
 	}
 	if req.TopK != nil {
-		genConfig["topK"] = *req.TopK
+		gc["topK"] = *req.TopK
 	}
 	if req.MaxTokens != nil && *req.MaxTokens > 0 {
-		genConfig["maxOutputTokens"] = *req.MaxTokens
+		gc["maxOutputTokens"] = *req.MaxTokens
 	}
 	if len(req.StopSequences) > 0 {
-		genConfig["stopSequences"] = req.StopSequences
+		gc["stopSequences"] = req.StopSequences
 	}
 	if req.FrequencyPenalty != nil {
-		genConfig["frequencyPenalty"] = *req.FrequencyPenalty
+		gc["frequencyPenalty"] = *req.FrequencyPenalty
 	}
 	if req.PresencePenalty != nil {
-		genConfig["presencePenalty"] = *req.PresencePenalty
+		gc["presencePenalty"] = *req.PresencePenalty
 	}
 	if req.Logprobs != nil && *req.Logprobs {
-		genConfig["responseLogprobs"] = true
+		gc["responseLogprobs"] = true
 		if req.TopLogprobs != nil {
-			genConfig["logprobs"] = *req.TopLogprobs
+			gc["logprobs"] = *req.TopLogprobs
 		}
 	}
 	if req.CandidateCount != nil && *req.CandidateCount > 1 {
-		genConfig["candidateCount"] = *req.CandidateCount
+		gc["candidateCount"] = *req.CandidateCount
 	}
 
-	isGemini3 := ir.IsGemini3(req.Model)
-
-	p.applyThinkingConfig(genConfig, req, isGemini3)
+	p.applyThinkingConfig(gc, req, ir.IsGemini3(req.Model))
 
 	if len(req.ResponseModality) > 0 {
-		genConfig["responseModalities"] = req.ResponseModality
+		gc["responseModalities"] = req.ResponseModality
 	}
-
 	if req.ImageConfig != nil && req.ImageConfig.AspectRatio != "" && req.Model != "gemini-2.5-flash-image-preview" {
-		imgConfig := map[string]any{"aspectRatio": req.ImageConfig.AspectRatio}
-		if req.ImageConfig.ImageSize != "" {
-			imgConfig["imageSize"] = req.ImageConfig.ImageSize
-		}
-		genConfig["imageConfig"] = imgConfig
+		gc["imageConfig"] = map[string]any{"aspectRatio": req.ImageConfig.AspectRatio, "imageSize": req.ImageConfig.ImageSize}
 	}
-
 	if req.ResponseSchema != nil {
-		genConfig["responseMimeType"] = "application/json"
-		genConfig["responseJsonSchema"] = req.ResponseSchema
+		gc["responseMimeType"] = "application/json"
+		gc["responseJsonSchema"] = req.ResponseSchema
 	}
 
 	if req.FunctionCalling != nil {
-		toolConfig := make(map[string]any)
-		fcConfig := make(map[string]any)
-
+		fc := map[string]any{}
 		if req.FunctionCalling.Mode != "" {
-			fcConfig["mode"] = req.FunctionCalling.Mode
+			fc["mode"] = req.FunctionCalling.Mode
 		}
 		if len(req.FunctionCalling.AllowedFunctionNames) > 0 {
-			fcConfig["allowedFunctionNames"] = req.FunctionCalling.AllowedFunctionNames
+			fc["allowedFunctionNames"] = req.FunctionCalling.AllowedFunctionNames
 		}
 		if req.FunctionCalling.StreamFunctionCallArguments {
-			fcConfig["streamFunctionCallArguments"] = true
+			fc["streamFunctionCallArguments"] = true
 		}
-
-		if len(fcConfig) > 0 {
-			toolConfig["functionCallingConfig"] = fcConfig
-			root["toolConfig"] = toolConfig
+		if len(fc) > 0 {
+			root["toolConfig"] = map[string]any{"functionCallingConfig": fc}
 		}
 	}
 
-	// Validation: Ensure maxOutputTokens is present and valid
-	// Upstream Antigravity/Vertex may reject missing maxOutputTokens or treat as 0
-	currentMax := 0
-	if v, ok := genConfig["maxOutputTokens"].(int); ok {
-		currentMax = v
-	} else if v32, ok := genConfig["maxOutputTokens"].(int32); ok {
-		currentMax = int(v32)
+	if v, ok := gc["maxOutputTokens"].(int); !ok || v < 1 {
+		gc["maxOutputTokens"] = ir.DefaultMaxOutputTokens
 	}
 
-	if currentMax < 1 {
-		// Default to 8192 if not provided (Safe for Claude Sonnet/Opus)
-		genConfig["maxOutputTokens"] = ir.DefaultMaxOutputTokens
-	}
-
-	if len(genConfig) > 0 {
-		root["generationConfig"] = genConfig
-	}
+	root["generationConfig"] = gc
 	return nil
 }
 
@@ -154,38 +118,26 @@ func (p *GeminiProvider) applyMessages(root map[string]any, req *ir.UnifiedChatR
 	if len(req.Messages) == 0 {
 		return nil
 	}
-
-	toolCallIDToName, toolResults := ir.BuildToolMaps(req.Messages)
+	toolIDToName, toolResults := ir.BuildToolMaps(req.Messages)
 	coalescer := ir.GetContentCoalescer(len(req.Messages) * 2)
 
 	for i := range req.Messages {
 		msg := &req.Messages[i]
-
 		switch msg.Role {
 		case ir.RoleSystem:
 			if text := p.extractSystemText(msg); text != "" {
-				root["systemInstruction"] = map[string]any{
-					"role":  "user",
-					"parts": []any{map[string]any{"text": text}},
-				}
+				root["systemInstruction"] = map[string]any{"role": "user", "parts": []any{map[string]any{"text": text}}}
 			}
-
 		case ir.RoleUser:
-			parts := p.buildUserParts(msg)
-			coalescer.Emit("user", parts)
-
+			coalescer.Emit("user", p.buildUserParts(msg))
 		case ir.RoleAssistant:
-			modelParts, responseParts := p.buildAssistantAndToolParts(
-				msg, toolCallIDToName, toolResults, req.Model,
-			)
+			modelParts, responseParts := p.buildAssistantAndToolParts(msg, toolIDToName, toolResults, req.Model)
 			coalescer.Emit("model", modelParts)
 			coalescer.Emit("user", responseParts)
 		}
 	}
-
 	contents := coalescer.Build()
 	ir.PutContentCoalescer(coalescer)
-
 	if contents != nil {
 		root["contents"] = contents
 	}
@@ -203,7 +155,6 @@ func (p *GeminiProvider) extractSystemText(msg *ir.Message) string {
 
 func (p *GeminiProvider) buildUserParts(msg *ir.Message) []any {
 	parts := make([]any, 0, len(msg.Content))
-
 	for i := range msg.Content {
 		part := &msg.Content[i]
 		switch part.Type {
@@ -233,20 +184,10 @@ func (p *GeminiProvider) buildImagePart(img *ir.ImagePart) any {
 		return nil
 	}
 	if img.Data != "" {
-		return map[string]any{
-			"inlineData": map[string]any{
-				"mimeType": img.MimeType,
-				"data":     img.Data,
-			},
-		}
+		return map[string]any{"inlineData": map[string]any{"mimeType": img.MimeType, "data": img.Data}}
 	}
-	if url := img.URL; strings.HasPrefix(url, "files/") || strings.HasPrefix(url, "gs://") {
-		return map[string]any{
-			"fileData": map[string]any{
-				"mimeType": img.MimeType,
-				"fileUri":  url,
-			},
-		}
+	if u := img.URL; strings.HasPrefix(u, "files/") || strings.HasPrefix(u, "gs://") {
+		return map[string]any{"fileData": map[string]any{"mimeType": img.MimeType, "fileUri": u}}
 	}
 	return nil
 }
@@ -256,20 +197,10 @@ func (p *GeminiProvider) buildAudioPart(audio *ir.AudioPart) any {
 		return nil
 	}
 	if audio.FileURI != "" {
-		return map[string]any{
-			"fileData": map[string]any{
-				"mimeType": audio.MimeType,
-				"fileUri":  audio.FileURI,
-			},
-		}
+		return map[string]any{"fileData": map[string]any{"mimeType": audio.MimeType, "fileUri": audio.FileURI}}
 	}
 	if audio.Data != "" {
-		return map[string]any{
-			"inlineData": map[string]any{
-				"mimeType": audio.MimeType,
-				"data":     audio.Data,
-			},
-		}
+		return map[string]any{"inlineData": map[string]any{"mimeType": audio.MimeType, "data": audio.Data}}
 	}
 	return nil
 }
@@ -279,270 +210,107 @@ func (p *GeminiProvider) buildVideoPart(video *ir.VideoPart) any {
 		return nil
 	}
 	if video.Data != "" {
-		return map[string]any{
-			"inlineData": map[string]any{
-				"mimeType": video.MimeType,
-				"data":     video.Data,
-			},
-		}
+		return map[string]any{"inlineData": map[string]any{"mimeType": video.MimeType, "data": video.Data}}
 	}
 	if video.FileURI != "" {
-		return map[string]any{
-			"fileData": map[string]any{
-				"mimeType": video.MimeType,
-				"fileUri":  video.FileURI,
-			},
-		}
+		return map[string]any{"fileData": map[string]any{"mimeType": video.MimeType, "fileUri": video.FileURI}}
 	}
 	return nil
 }
 
-func (p *GeminiProvider) buildAssistantAndToolParts(
-	msg *ir.Message,
-	toolIDToName map[string]string,
-	toolResults map[string]*ir.ToolResultPart,
-	model string,
-) (modelParts, responseParts []any) {
-	if len(msg.Content) == 0 && len(msg.ToolCalls) == 0 {
-		return nil, nil
-	}
-
+func (p *GeminiProvider) buildAssistantAndToolParts(msg *ir.Message, toolIDToName map[string]string, toolResults map[string]*ir.ToolResultPart, model string) (modelParts, responseParts []any) {
 	for i := range msg.Content {
 		cp := &msg.Content[i]
-		switch cp.Type {
-		case ir.ContentTypeReasoning:
-			if cp.Reasoning == "" {
-				continue
-			}
-			if modelParts == nil {
-				modelParts = make([]any, 0, len(msg.Content)+len(msg.ToolCalls))
-			}
-			part := map[string]any{"text": cp.Reasoning, "thought": true}
-			if ir.IsValidThoughtSignature(cp.ThoughtSignature) {
-				part["thoughtSignature"] = string(cp.ThoughtSignature)
-			}
-			modelParts = append(modelParts, part)
-
-		case ir.ContentTypeText:
-			if cp.Text == "" {
-				continue
-			}
-			if modelParts == nil {
-				modelParts = make([]any, 0, len(msg.Content)+len(msg.ToolCalls))
-			}
-			part := map[string]any{"text": cp.Text}
+		part := map[string]any{}
+		if cp.Type == ir.ContentTypeReasoning && cp.Reasoning != "" {
+			part = map[string]any{"text": cp.Reasoning, "thought": true}
+		} else if cp.Type == ir.ContentTypeText && cp.Text != "" {
+			part = map[string]any{"text": cp.Text}
+		}
+		if len(part) > 0 {
 			if ir.IsValidThoughtSignature(cp.ThoughtSignature) {
 				part["thoughtSignature"] = string(cp.ThoughtSignature)
 			}
 			modelParts = append(modelParts, part)
 		}
-	}
-
-	if len(msg.ToolCalls) == 0 {
-		return modelParts, nil
-	}
-
-	if modelParts == nil {
-		modelParts = make([]any, 0, len(msg.ToolCalls))
 	}
 
 	for i := range msg.ToolCalls {
 		tc := &msg.ToolCalls[i]
-
-		toolID := tc.ID
-		if toolID == "" {
-			toolID = fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), i)
+		id := tc.ID
+		if id == "" {
+			id = fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), i)
 		}
-
-		fcMap := map[string]any{
-			"name": tc.Name,
-			"args": json.RawMessage(ir.ValidateAndNormalizeJSON(tc.Args)),
-			"id":   toolID,
-		}
-		part := map[string]any{"functionCall": fcMap}
-
-		// Only use the tool call's own signature - do not propagate from other parts
-		// ThoughtSignature is opaque and context-specific, reusing it can cause corruption
+		part := map[string]any{"functionCall": map[string]any{"name": tc.Name, "args": json.RawMessage(ir.ValidateAndNormalizeJSON(tc.Args)), "id": id}}
 		if ir.IsValidThoughtSignature(tc.ThoughtSignature) {
 			part["thoughtSignature"] = string(tc.ThoughtSignature)
 		} else if ir.IsGemini3(model) {
-			// Gemini 3 requires thoughtSignature for function calls (strict validation)
-			// Use dummy signature for migrated conversations without valid signatures
-			// See: https://ai.google.dev/gemini-api/docs/gemini-3#thought_signatures
 			part["thoughtSignature"] = ir.DummyThoughtSignature
 		}
 		modelParts = append(modelParts, part)
 
-		name, hasName := toolIDToName[toolID]
-		if !hasName {
-			continue
-		}
-		resultPart, hasResult := toolResults[toolID]
-		if !hasResult {
-			continue
-		}
-
-		if responseParts == nil {
-			responseParts = make([]any, 0, len(msg.ToolCalls)*2)
-		}
-
-		funcResp := map[string]any{
-			"name":     name,
-			"id":       toolID,
-			"response": buildFunctionResponseObject(resultPart.Result, resultPart.IsError),
-		}
-		responseParts = append(responseParts, map[string]any{"functionResponse": funcResp})
-
-		for _, img := range resultPart.Images {
-			if img.Data != "" {
-				responseParts = append(responseParts, map[string]any{
-					"inlineData": map[string]any{
-						"mimeType": img.MimeType,
-						"data":     img.Data,
-					},
-				})
-			} else if img.URL != "" {
-				responseParts = append(responseParts, map[string]any{
-					"fileData": map[string]any{
-						"fileUri":  img.URL,
-						"mimeType": img.MimeType,
-					},
-				})
+		if name, ok := toolIDToName[id]; ok {
+			if res, ok := toolResults[id]; ok {
+				responseParts = append(responseParts, map[string]any{"functionResponse": map[string]any{"name": name, "id": id, "response": buildFunctionResponseObject(res.Result, res.IsError)}})
+				for _, img := range res.Images {
+					if img.Data != "" {
+						responseParts = append(responseParts, map[string]any{"inlineData": map[string]any{"mimeType": img.MimeType, "data": img.Data}})
+					} else if img.URL != "" {
+						responseParts = append(responseParts, map[string]any{"fileData": map[string]any{"fileUri": img.URL, "mimeType": img.MimeType}})
+					}
+				}
 			}
 		}
 	}
-
-	return modelParts, responseParts
+	return
 }
 
 func (p *GeminiProvider) applyTools(root map[string]any, req *ir.UnifiedChatRequest) error {
-	// Extract built-in tools from Metadata (using ir.Meta* constants)
-	var googleSearch, googleSearchRetrieval, codeExecution, urlContext, fileSearch any
+	tn := make(map[string]any)
 	if req.Metadata != nil {
-		if gs, ok := req.Metadata[ir.MetaGoogleSearch]; ok {
-			// Clean internal fields before passing to Gemini
-			if gsMap, ok := gs.(map[string]any); ok {
-				cleanedGS := make(map[string]any)
-				for k, v := range gsMap {
-					if k != "_original_type" && k != "max_uses" { // Claude-specific fields
-						cleanedGS[k] = v
+		for k, meta := range map[string]string{ir.MetaGoogleSearch: "googleSearch", ir.MetaGoogleSearchRetrieval: "googleSearchRetrieval", ir.MetaCodeExecution: "codeExecution", ir.MetaURLContext: "urlContext", ir.MetaFileSearch: "fileSearch"} {
+			if v, ok := req.Metadata[k]; ok {
+				if m, ok := v.(map[string]any); ok {
+					cleaned := map[string]any{}
+					for mk, mv := range m {
+						if mk != "_original_type" && mk != "max_uses" && mk != "container" && mk != "vector_store" && mk != "max_num_results" && mk != "ranking_options" {
+							cleaned[mk] = mv
+						}
 					}
+					tn[meta] = cleaned
+				} else {
+					tn[meta] = v
 				}
-				googleSearch = cleanedGS
-			} else {
-				googleSearch = gs
 			}
 		}
-		if gsr, ok := req.Metadata[ir.MetaGoogleSearchRetrieval]; ok {
-			googleSearchRetrieval = gsr
-		}
-		if ce, ok := req.Metadata[ir.MetaCodeExecution]; ok {
-			// Clean internal fields
-			if ceMap, ok := ce.(map[string]any); ok {
-				cleanedCE := make(map[string]any)
-				for k, v := range ceMap {
-					if k != "container" { // OpenAI-specific field
-						cleanedCE[k] = v
-					}
-				}
-				codeExecution = cleanedCE
-			} else {
-				codeExecution = ce
-			}
-		}
-		if uc, ok := req.Metadata[ir.MetaURLContext]; ok {
-			urlContext = uc
-		}
-		if fs, ok := req.Metadata[ir.MetaFileSearch]; ok {
-			// Note: Gemini fileSearch requires fileSearchStoreNames, OpenAI uses vector_store
-			// Clean OpenAI-specific fields
-			if fsMap, ok := fs.(map[string]any); ok {
-				cleanedFS := make(map[string]any)
-				for k, v := range fsMap {
-					if k != "vector_store" && k != "max_num_results" && k != "ranking_options" {
-						cleanedFS[k] = v
-					}
-				}
-				fileSearch = cleanedFS
-			} else {
-				fileSearch = fs
-			}
-		}
-
-		// Note: Claude-specific tools (computer, bash, text_editor) have no Gemini equivalent
-		// MetaClaudeComputer, MetaClaudeBash, MetaClaudeTextEditor are silently dropped
-		// These tools require Claude-specific backend support
 	}
-
-	hasBuiltInTools := googleSearch != nil || googleSearchRetrieval != nil || codeExecution != nil || urlContext != nil || fileSearch != nil
-	if len(req.Tools) == 0 && !hasBuiltInTools {
-		return nil
-	}
-
-	toolNode := make(map[string]any)
 
 	if len(req.Tools) > 0 {
 		funcs := make([]any, len(req.Tools))
 		for i, t := range req.Tools {
-			funcDecl := map[string]any{
-				"name":        t.Name,
-				"description": t.Description,
-			}
-			if len(t.Parameters) == 0 {
-				funcDecl["parameters"] = map[string]any{
-					"type":       "object",
-					"properties": map[string]any{},
-				}
+			params := ir.CleanJsonSchemaForGemini(ir.CopyMap(t.Parameters))
+			if params == nil {
+				params = map[string]any{"type": "object", "properties": map[string]any{}}
 			} else {
-				// Use "parameters" instead of "parametersJsonSchema" for broad compatibility
-				// (including Antigravity/Vertex Claude models).
-				// Use CleanJsonSchemaForGemini to recursively remove unsupported fields like
-				// exclusiveMinimum, exclusiveMaximum, etc.
-				params := ir.CleanJsonSchemaForGemini(ir.CopyMap(t.Parameters))
-				// Gemini requires parameters to have type "object"
-				// Handle nil, empty string, or invalid type values (e.g., "None" from some SDKs)
-				typeVal, hasType := params["type"].(string)
-				if !hasType || typeVal == "" || typeVal == "None" {
+				if tv, ok := params["type"].(string); !ok || tv == "" || tv == "None" {
 					params["type"] = "object"
 				}
 				if params["properties"] == nil {
 					params["properties"] = map[string]any{}
 				}
-				funcDecl["parameters"] = params
 			}
-			funcs[i] = funcDecl
+			funcs[i] = map[string]any{"name": t.Name, "description": t.Description, "parameters": params}
 		}
-		toolNode["functionDeclarations"] = funcs
+		tn["functionDeclarations"] = funcs
 	}
 
-	// Add built-in tools
-	if googleSearch != nil {
-		toolNode["googleSearch"] = googleSearch
+	if len(tn) == 0 {
+		return nil
 	}
-	if googleSearchRetrieval != nil {
-		toolNode["googleSearchRetrieval"] = googleSearchRetrieval
-	}
-	if codeExecution != nil {
-		toolNode["codeExecution"] = codeExecution
-	}
-	if urlContext != nil {
-		toolNode["urlContext"] = urlContext
-	}
-	if fileSearch != nil {
-		toolNode["fileSearch"] = fileSearch
-	}
+	root["tools"] = []any{tn}
 
-	root["tools"] = []any{toolNode}
-
-	// Set toolConfig.functionCallingConfig.mode based on ToolChoice from request.
-	// - "none" -> NONE (don't call functions)
-	// - "required" or "any" -> ANY (must call a function)
-	// - "auto" or empty -> AUTO (model decides)
-	// Note: We default to AUTO, not ANY, because ANY forces the model to always
-	// call a function even when inappropriate (e.g., user says "hello").
 	if len(req.Tools) > 0 {
-		mode := "AUTO" // Default: let model decide
-		var allowedFunctionNames []string
+		mode, allowed := "AUTO", []string(nil)
 		switch req.ToolChoice {
 		case "none":
 			mode = "NONE"
@@ -552,499 +320,310 @@ func (p *GeminiProvider) applyTools(root map[string]any, req *ir.UnifiedChatRequ
 			mode = "VALIDATED"
 		case "function":
 			if req.ToolChoiceFunction != "" {
-				mode = "ANY"
-				allowedFunctionNames = []string{req.ToolChoiceFunction}
-			} else {
-				// tool_choice="function" without function name - likely a caller bug.
-				// Falling back to AUTO to avoid breaking the request.
-				log.Warnf("gemini: tool_choice='function' but ToolChoiceFunction is empty, falling back to AUTO")
-				mode = "AUTO"
+				mode, allowed = "ANY", []string{req.ToolChoiceFunction}
 			}
-		case "auto", "":
-			mode = "AUTO"
 		}
-		toolConfig := map[string]any{
-			"functionCallingConfig": map[string]any{
-				"mode": mode,
-			},
+		fc := map[string]any{"mode": mode}
+		if len(allowed) > 0 {
+			fc["allowedFunctionNames"] = allowed
 		}
-		if len(allowedFunctionNames) > 0 {
-			toolConfig["functionCallingConfig"].(map[string]any)["allowedFunctionNames"] = allowedFunctionNames
-		}
-		root["toolConfig"] = toolConfig
+		root["toolConfig"] = map[string]any{"functionCallingConfig": fc}
 	}
-
 	return nil
 }
 
 func (p *GeminiProvider) applySafetySettings(root map[string]any, req *ir.UnifiedChatRequest) {
 	if len(req.SafetySettings) > 0 {
-		settings := make([]any, len(req.SafetySettings))
-		for i, s := range req.SafetySettings {
-			settings[i] = map[string]any{
-				"category":  s.Category,
-				"threshold": s.Threshold,
-			}
+		s := make([]any, len(req.SafetySettings))
+		for i, v := range req.SafetySettings {
+			s[i] = map[string]any{"category": v.Category, "threshold": v.Threshold}
 		}
-		root["safetySettings"] = settings
+		root["safetySettings"] = s
 	} else {
-		// Default settings
 		root["safetySettings"] = ir.DefaultGeminiSafetySettings()
 	}
 }
 
-// fixImageAspectRatioForPreview handles gemini-2.5-flash-image-preview requirements.
 func (p *GeminiProvider) fixImageAspectRatioForPreview(root map[string]any, aspectRatio string) {
 	contents, ok := root["contents"].([]any)
 	if !ok || len(contents) == 0 {
 		return
 	}
-
-	// Check if there's already an image
-	hasInlineData := false
-	for _, content := range contents {
-		if cMap, ok := content.(map[string]any); ok {
-			if parts, ok := cMap["parts"].([]any); ok {
-				for _, part := range parts {
-					if pMap, ok := part.(map[string]any); ok {
-						if _, exists := pMap["inlineData"]; exists {
-							hasInlineData = true
-							break
-						}
+	for _, c := range contents {
+		if cm, ok := c.(map[string]any); ok {
+			for _, p := range cm["parts"].([]any) {
+				if pm, ok := p.(map[string]any); ok {
+					if _, ok := pm["inlineData"]; ok {
+						return
 					}
 				}
 			}
 		}
-		if hasInlineData {
-			break
-		}
 	}
-
-	if hasInlineData {
-		return
-	}
-
-	// Inject white image placeholder
-	emptyImageBase64, err := util.CreateWhiteImageBase64(aspectRatio)
+	img, err := util.CreateWhiteImageBase64(aspectRatio)
 	if err != nil {
 		return
 	}
-
-	// Create new parts for the first content message
-	firstContent, ok := contents[0].(map[string]any)
+	fc, ok := contents[0].(map[string]any)
 	if !ok {
 		return
 	}
-	existingParts, ok := firstContent["parts"].([]any)
-	if !ok {
-		return
-	}
-
-	newParts := []any{
-		map[string]any{
-			"text": "Based on the following requirements, create an image within the uploaded picture. The new content *MUST* completely cover the entire area of the original picture, maintaining its exact proportions, and *NO* blank areas should appear.",
-		},
-		map[string]any{
-			"inlineData": map[string]any{
-				"mime_type": "image/png",
-				"data":      emptyImageBase64,
-			},
-		},
-	}
-	newParts = append(newParts, existingParts...)
-	firstContent["parts"] = newParts
-
-	// Update generation config
-	if genConfig, ok := root["generationConfig"].(map[string]any); ok {
-		genConfig["responseModalities"] = []string{"IMAGE", "TEXT"}
-		delete(genConfig, "imageConfig")
-	} else {
-		root["generationConfig"] = map[string]any{
-			"responseModalities": []string{"IMAGE", "TEXT"},
-		}
+	parts := append([]any{map[string]any{"text": "Based on the following requirements, create an image within the uploaded picture. The new content *MUST* completely cover the entire area of the original picture, maintaining its exact proportions, and *NO* blank areas should appear."}, map[string]any{"inlineData": map[string]any{"mime_type": "image/png", "data": img}}}, fc["parts"].([]any)...)
+	fc["parts"] = parts
+	if gc, ok := root["generationConfig"].(map[string]any); ok {
+		gc["responseModalities"] = []string{"IMAGE", "TEXT"}
+		delete(gc, "imageConfig")
 	}
 }
 
-// --- Response Conversion ---
-
-// ToGeminiResponse converts messages to a complete Gemini API response.
 func ToGeminiResponse(messages []ir.Message, usage *ir.Usage, model string) ([]byte, error) {
 	return ToGeminiResponseMeta(messages, usage, model, nil)
 }
 
-// ToGeminiResponseMeta converts messages to a complete Gemini API response with metadata.
 func ToGeminiResponseMeta(messages []ir.Message, usage *ir.Usage, model string, meta *ir.OpenAIMeta) ([]byte, error) {
 	builder := ir.NewResponseBuilder(messages, usage, model, false)
-
-	response := map[string]any{
-		"candidates":   []any{},
-		"modelVersion": model,
-	}
-
-	candidate := map[string]any{
-		"content": map[string]any{
-			"role":  "model",
-			"parts": builder.BuildGeminiContentParts(),
-		},
-		"finishReason": "STOP",
-	}
-
-	// Add grounding metadata to candidate if present
+	candidate := map[string]any{"content": map[string]any{"role": "model", "parts": builder.BuildGeminiContentParts()}, "finishReason": "STOP"}
 	if meta != nil && meta.GroundingMetadata != nil {
 		candidate["groundingMetadata"] = buildGroundingMetadataMap(meta.GroundingMetadata)
 	}
-
+	response := map[string]any{"candidates": []any{}, "modelVersion": model}
 	if builder.HasContent() {
 		response["candidates"] = []any{candidate}
 	}
-
 	if usage != nil {
-		usageMetadata := map[string]any{
-			"promptTokenCount":     usage.PromptTokens,
-			"candidatesTokenCount": usage.CompletionTokens,
-			"totalTokenCount":      usage.TotalTokens,
-		}
+		um := map[string]any{"promptTokenCount": usage.PromptTokens, "candidatesTokenCount": usage.CompletionTokens, "totalTokenCount": usage.TotalTokens}
 		if usage.ThoughtsTokenCount > 0 {
-			usageMetadata["thoughtsTokenCount"] = usage.ThoughtsTokenCount
+			um["thoughtsTokenCount"] = usage.ThoughtsTokenCount
 		}
 		if usage.PromptTokensDetails != nil && usage.PromptTokensDetails.CachedTokens > 0 {
-			usageMetadata["cachedContentTokenCount"] = usage.PromptTokensDetails.CachedTokens
+			um["cachedContentTokenCount"] = usage.PromptTokensDetails.CachedTokens
 		}
 		if usage.ToolUsePromptTokens > 0 {
-			usageMetadata["toolUsePromptTokenCount"] = usage.ToolUsePromptTokens
+			um["toolUsePromptTokenCount"] = usage.ToolUsePromptTokens
 		}
-		response["usageMetadata"] = usageMetadata
+		response["usageMetadata"] = um
 	}
-
 	return json.Marshal(response)
 }
 
-// ToGeminiChunk converts a single event to Gemini streaming chunk.
 func ToGeminiChunk(event ir.UnifiedEvent, model string) ([]byte, error) {
-	chunk := map[string]any{
-		"candidates":   []any{},
-		"modelVersion": model,
-	}
-
-	candidate := map[string]any{
-		"content": map[string]any{
-			"role":  "model",
-			"parts": []any{},
-		},
-	}
-
+	candidate := map[string]any{"content": map[string]any{"role": "model", "parts": []any{}}}
+	chunk := map[string]any{"candidates": []any{}, "modelVersion": model}
 	switch event.Type {
 	case ir.EventTypeToken:
-		candidate["content"].(map[string]any)["parts"] = []any{
-			map[string]any{"text": event.Content},
+		t := event.Content
+		if t == "" {
+			t = "\u200b"
 		}
-
+		candidate["content"].(map[string]any)["parts"] = []any{map[string]any{"text": t}}
 	case ir.EventTypeReasoning:
-		candidate["content"].(map[string]any)["parts"] = []any{
-			map[string]any{"text": event.Reasoning, "thought": true},
+		t := event.Reasoning
+		if t == "" {
+			t = "\u200b"
 		}
-
+		p := map[string]any{"text": t, "thought": true}
+		if len(event.ThoughtSignature) > 0 {
+			p["thoughtSignature"] = string(event.ThoughtSignature)
+		}
+		candidate["content"].(map[string]any)["parts"] = []any{p}
 	case ir.EventTypeToolCall:
 		if event.ToolCall != nil {
-			var argsObj any = map[string]any{}
+			var args any = map[string]any{}
 			if event.ToolCall.Args != "" && event.ToolCall.Args != "{}" {
-				if err := json.Unmarshal([]byte(event.ToolCall.Args), &argsObj); err != nil {
-					argsObj = map[string]any{}
-				}
+				json.Unmarshal([]byte(event.ToolCall.Args), &args)
 			}
-			part := map[string]any{
-				"functionCall": map[string]any{
-					"name": event.ToolCall.Name,
-					"args": argsObj,
-				},
-			}
-			// Include thoughtSignature on functionCall part (required by Gemini API for multi-turn)
+			p := map[string]any{"functionCall": map[string]any{"name": event.ToolCall.Name, "args": args}}
 			if len(event.ThoughtSignature) > 0 {
-				part["thoughtSignature"] = string(event.ThoughtSignature)
+				p["thoughtSignature"] = string(event.ThoughtSignature)
 			} else if len(event.ToolCall.ThoughtSignature) > 0 {
-				part["thoughtSignature"] = string(event.ToolCall.ThoughtSignature)
+				p["thoughtSignature"] = string(event.ToolCall.ThoughtSignature)
 			}
-			candidate["content"].(map[string]any)["parts"] = []any{part}
+			candidate["content"].(map[string]any)["parts"] = []any{p}
 		}
-
 	case ir.EventTypeImage:
 		if event.Image != nil {
-			candidate["content"].(map[string]any)["parts"] = []any{
-				map[string]any{
-					"inlineData": map[string]any{
-						"mimeType": event.Image.MimeType,
-						"data":     event.Image.Data,
-					},
-				},
-			}
+			candidate["content"].(map[string]any)["parts"] = []any{map[string]any{"inlineData": map[string]any{"mimeType": event.Image.MimeType, "data": event.Image.Data}}}
 		}
-
 	case ir.EventTypeCodeExecution:
-		if event.CodeExecution != nil {
-			var part map[string]any
-			if event.CodeExecution.Code != "" {
-				// Executable code
-				part = map[string]any{
-					"executableCode": map[string]any{
-						"language": event.CodeExecution.Language,
-						"code":     event.CodeExecution.Code,
-					},
-				}
+		if ec := event.CodeExecution; ec != nil {
+			var p map[string]any
+			if ec.Code != "" {
+				p = map[string]any{"executableCode": map[string]any{"language": ec.Language, "code": ec.Code}}
 			} else {
-				// Code execution result
-				part = map[string]any{
-					"codeExecutionResult": map[string]any{
-						"outcome": event.CodeExecution.Outcome,
-						"output":  event.CodeExecution.Output,
-					},
-				}
+				p = map[string]any{"codeExecutionResult": map[string]any{"outcome": ec.Outcome, "output": ec.Output}}
 			}
-			candidate["content"].(map[string]any)["parts"] = []any{part}
+			candidate["content"].(map[string]any)["parts"] = []any{p}
 		}
-
 	case ir.EventTypeFinish:
 		candidate["finishReason"] = "STOP"
 		if event.GroundingMetadata != nil {
 			candidate["groundingMetadata"] = buildGroundingMetadataMap(event.GroundingMetadata)
 		}
-		if event.Usage != nil {
-			usageMetadata := map[string]any{
-				"promptTokenCount":     event.Usage.PromptTokens,
-				"candidatesTokenCount": event.Usage.CompletionTokens,
-				"totalTokenCount":      event.Usage.TotalTokens,
+		if usage := event.Usage; usage != nil {
+			um := map[string]any{"promptTokenCount": usage.PromptTokens, "candidatesTokenCount": usage.CompletionTokens, "totalTokenCount": usage.TotalTokens}
+			if usage.ThoughtsTokenCount > 0 {
+				um["thoughtsTokenCount"] = usage.ThoughtsTokenCount
 			}
-			if event.Usage.ThoughtsTokenCount > 0 {
-				usageMetadata["thoughtsTokenCount"] = event.Usage.ThoughtsTokenCount
+			if usage.PromptTokensDetails != nil && usage.PromptTokensDetails.CachedTokens > 0 {
+				um["cachedContentTokenCount"] = usage.PromptTokensDetails.CachedTokens
 			}
-			if event.Usage.PromptTokensDetails != nil && event.Usage.PromptTokensDetails.CachedTokens > 0 {
-				usageMetadata["cachedContentTokenCount"] = event.Usage.PromptTokensDetails.CachedTokens
+			if usage.ToolUsePromptTokens > 0 {
+				um["toolUsePromptTokenCount"] = usage.ToolUsePromptTokens
 			}
-			if event.Usage.ToolUsePromptTokens > 0 {
-				usageMetadata["toolUsePromptTokenCount"] = event.Usage.ToolUsePromptTokens
-			}
-			chunk["usageMetadata"] = usageMetadata
+			chunk["usageMetadata"] = um
 		}
-
 	case ir.EventTypeError:
 		return nil, fmt.Errorf("stream error: %v", event.Error)
-
-	default:
-		return nil, nil
 	}
-
 	chunk["candidates"] = []any{candidate}
-
-	jsonBytes, err := json.Marshal(chunk)
+	jb, err := json.Marshal(chunk)
 	if err != nil {
 		return nil, err
 	}
-
-	// Gemini uses newline-delimited JSON (not SSE format)
-	return append(jsonBytes, '\n'), nil
+	return append(jb, '\n'), nil
 }
 
 func buildGroundingMetadataMap(gm *ir.GroundingMetadata) map[string]any {
 	if gm == nil {
 		return nil
 	}
-
-	result := map[string]any{}
-
+	res := map[string]any{}
 	if len(gm.WebSearchQueries) > 0 {
-		result["webSearchQueries"] = gm.WebSearchQueries
+		res["webSearchQueries"] = gm.WebSearchQueries
 	}
-
 	if gm.SearchEntryPoint != nil && gm.SearchEntryPoint.RenderedContent != "" {
-		result["searchEntryPoint"] = map[string]any{
-			"renderedContent": gm.SearchEntryPoint.RenderedContent,
-		}
+		res["searchEntryPoint"] = map[string]any{"renderedContent": gm.SearchEntryPoint.RenderedContent}
 	}
-
 	if len(gm.GroundingChunks) > 0 {
-		chunks := make([]map[string]any, 0, len(gm.GroundingChunks))
-		for _, chunk := range gm.GroundingChunks {
-			if chunk.Web != nil {
-				webMap := map[string]any{
-					"uri":   chunk.Web.URI,
-					"title": chunk.Web.Title,
+		var chunks []map[string]any
+		for _, c := range gm.GroundingChunks {
+			if c.Web != nil {
+				w := map[string]any{"uri": c.Web.URI, "title": c.Web.Title}
+				if c.Web.Domain != "" {
+					w["domain"] = c.Web.Domain
 				}
-				if chunk.Web.Domain != "" {
-					webMap["domain"] = chunk.Web.Domain
-				}
-				chunks = append(chunks, map[string]any{"web": webMap})
+				chunks = append(chunks, map[string]any{"web": w})
 			}
 		}
-		if len(chunks) > 0 {
-			result["groundingChunks"] = chunks
-		}
+		res["groundingChunks"] = chunks
 	}
-
 	if len(gm.GroundingSupports) > 0 {
-		supports := make([]map[string]any, 0, len(gm.GroundingSupports))
+		var supports []map[string]any
 		for _, s := range gm.GroundingSupports {
-			support := map[string]any{}
+			sup := map[string]any{}
 			if s.Segment != nil {
-				segment := map[string]any{
-					"text": s.Segment.Text,
-				}
+				seg := map[string]any{"text": s.Segment.Text}
 				if s.Segment.StartIndex > 0 {
-					segment["startIndex"] = s.Segment.StartIndex
+					seg["startIndex"] = s.Segment.StartIndex
 				}
 				if s.Segment.EndIndex > 0 {
-					segment["endIndex"] = s.Segment.EndIndex
+					seg["endIndex"] = s.Segment.EndIndex
 				}
-				support["segment"] = segment
+				sup["segment"] = seg
 			}
 			if len(s.GroundingChunkIndices) > 0 {
-				support["groundingChunkIndices"] = s.GroundingChunkIndices
+				sup["groundingChunkIndices"] = s.GroundingChunkIndices
 			}
-			supports = append(supports, support)
+			supports = append(supports, sup)
 		}
-		if len(supports) > 0 {
-			result["groundingSupports"] = supports
-		}
+		res["groundingSupports"] = supports
 	}
-
-	result["retrievalMetadata"] = map[string]any{}
-
-	return result
+	res["retrievalMetadata"] = map[string]any{}
+	return res
 }
 
-// --- Gemini CLI Provider ---
-
-// GeminiCLIProvider handles conversion to Gemini CLI format.
-// CLI format wraps AI Studio format: {"project":"", "model":"", "request":{...}}
 type GeminiCLIProvider struct{}
 
 func (p *GeminiCLIProvider) ConvertRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
-	geminiJSON, err := (&GeminiProvider{}).ConvertRequest(req)
+	gj, err := (&GeminiProvider{}).ConvertRequest(req)
 	if err != nil {
 		return nil, err
 	}
-
-	// Wrap in CLI envelope: {"project":"", "model":"...", "request":{...}}
-	envelope := map[string]any{
-		"project": "",
-		"model":   "",
-		"request": json.RawMessage(geminiJSON),
-	}
-	if req.Model != "" {
-		envelope["model"] = req.Model
-	}
-
-	return json.Marshal(envelope)
+	return json.Marshal(map[string]any{"project": "", "model": req.Model, "request": json.RawMessage(gj)})
 }
 
-// ParseResponse parses a non-streaming Gemini CLI response into unified format.
-// Delegates to to_ir package as the logic is identical to Gemini AI Studio response parsing.
-func (p *GeminiCLIProvider) ParseResponse(responseJSON []byte) ([]ir.Message, *ir.Usage, error) {
-	_, messages, usage, err := to_ir.ParseGeminiResponse(responseJSON)
-	return messages, usage, err
+func (p *GeminiCLIProvider) ParseResponse(rj []byte) ([]ir.Message, *ir.Usage, error) {
+	_, ms, us, err := to_ir.ParseGeminiResponse(rj)
+	return ms, us, err
 }
 
-// Delegates to to_ir package as the logic is identical to Gemini AI Studio chunk parsing.
-func (p *GeminiCLIProvider) ParseStreamChunk(chunkJSON []byte) ([]ir.UnifiedEvent, error) {
-	return to_ir.ParseGeminiChunk(chunkJSON)
+func (p *GeminiCLIProvider) ParseStreamChunk(cj []byte) ([]ir.UnifiedEvent, error) {
+	return to_ir.ParseGeminiChunk(cj)
 }
 
-// Delegates to to_ir package as the logic is identical to Gemini AI Studio chunk parsing.
-func (p *GeminiCLIProvider) ParseStreamChunkWithContext(chunkJSON []byte, schemaCtx *ir.ToolSchemaContext) ([]ir.UnifiedEvent, error) {
-	return to_ir.ParseGeminiChunkWithContext(chunkJSON, schemaCtx)
+func (p *GeminiCLIProvider) ParseStreamChunkWithContext(cj []byte, sc *ir.ToolSchemaContext) ([]ir.UnifiedEvent, error) {
+	return to_ir.ParseGeminiChunkWithContext(cj, sc)
 }
 
-func buildFunctionResponseObject(result string, isError bool) any {
-	if result == "" {
+func buildFunctionResponseObject(res string, isError bool) any {
+	if res == "" {
 		if isError {
 			return map[string]any{"error": "Tool execution failed"}
 		}
 		return map[string]any{"content": ""}
 	}
 	if isError {
-		return map[string]any{"error": result}
+		return map[string]any{"error": res}
 	}
-	if parsed := gjson.Parse(result); parsed.Type == gjson.JSON {
-		var jsonObj any
-		if err := json.Unmarshal([]byte(result), &jsonObj); err == nil {
-			if _, isArray := jsonObj.([]any); isArray {
-				return map[string]any{"result": jsonObj}
+	if parsed := gjson.Parse(res); parsed.Type == gjson.JSON {
+		var jo any
+		if err := json.Unmarshal([]byte(res), &jo); err == nil {
+			if _, isArray := jo.([]any); isArray {
+				return map[string]any{"result": jo}
 			}
-			return jsonObj
+			return jo
 		}
 	}
-	return map[string]any{"content": result}
+	return map[string]any{"content": res}
 }
 
-func (p *GeminiProvider) applyThinkingConfig(genConfig map[string]any, req *ir.UnifiedChatRequest, isGemini3 bool) {
-	// Explicitly disabled via metadata for non-streaming Claude via Antigravity
-	// See: translator_wrapper.go TranslateToGeminiCLIWithTokens
+func (p *GeminiProvider) applyThinkingConfig(gc map[string]any, req *ir.UnifiedChatRequest, isG3 bool) {
 	if force, _ := req.Metadata[ir.MetaForceDisableThinking].(bool); force {
 		return
 	}
-
-	// Get auto config from registry - only models with Thinking metadata get auto=true
 	budget, include, auto := util.GetAutoAppliedThinkingConfig(req.Model)
-
-	// Apply thinking if:
-	// 1. User explicitly provided thinking config (req.Thinking != nil), OR
-	// 2. Model supports thinking and auto-enable is set (auto=true from registry)
 	if req.Thinking == nil && !auto {
 		return
 	}
-
-	// Use registry defaults, but override with user's explicit config
-	effectiveBudget := budget
-	effectiveInclude := include
-
+	eb, ei := budget, include
 	if req.Thinking != nil {
 		if req.Thinking.ThinkingBudget != nil {
-			effectiveBudget = int(*req.Thinking.ThinkingBudget)
+			eb = int(*req.Thinking.ThinkingBudget)
 		}
-		effectiveInclude = req.Thinking.IncludeThoughts
+		ei = req.Thinking.IncludeThoughts
 	}
-
-	// Ensure valid budget for models that require it
-	if effectiveBudget <= 0 {
-		effectiveBudget = ir.DefaultThinkingBudgetTokens
+	if eb <= 0 {
+		eb = ir.DefaultThinkingBudgetTokens
 	}
-
-	if isGemini3 {
-		p.applyGemini3ThinkingConfig(genConfig, req, effectiveInclude)
+	if isG3 {
+		p.applyGemini3ThinkingConfig(gc, req, ei)
 	} else {
-		genConfig["thinkingConfig"] = map[string]any{
-			"thinkingBudget":  effectiveBudget,
-			"includeThoughts": effectiveInclude,
-		}
+		gc["thinkingConfig"] = map[string]any{"thinkingBudget": eb, "includeThoughts": ei}
 	}
-
-	p.adjustMaxTokensForThinking(genConfig, req)
+	p.adjustMaxTokensForThinking(gc, req)
 }
 
-func (p *GeminiProvider) applyGemini3ThinkingConfig(genConfig map[string]any, req *ir.UnifiedChatRequest, effectiveInclude bool) {
-	tc := map[string]any{"includeThoughts": effectiveInclude}
-
-	var thinkingLevel string
+func (p *GeminiProvider) applyGemini3ThinkingConfig(gc map[string]any, req *ir.UnifiedChatRequest, ei bool) {
+	tl := ""
 	switch {
 	case req.Thinking != nil && req.Thinking.Effort != "":
-		thinkingLevel = string(ir.EffortToThinkingLevel(req.Model, string(req.Thinking.Effort)))
+		tl = string(ir.EffortToThinkingLevel(req.Model, string(req.Thinking.Effort)))
 	case req.Thinking != nil && req.Thinking.ThinkingBudget != nil:
-		thinkingLevel = string(ir.BudgetToThinkingLevel(req.Model, int(*req.Thinking.ThinkingBudget)))
+		tl = string(ir.BudgetToThinkingLevel(req.Model, int(*req.Thinking.ThinkingBudget)))
 	default:
-		thinkingLevel = string(ir.DefaultThinkingLevel(req.Model))
+		tl = string(ir.DefaultThinkingLevel(req.Model))
 	}
-
-	tc["thinkingLevel"] = thinkingLevel
-	genConfig["thinkingConfig"] = tc
+	gc["thinkingConfig"] = map[string]any{"includeThoughts": ei, "thinkingLevel": tl}
 }
 
-func (p *GeminiProvider) adjustMaxTokensForThinking(genConfig map[string]any, req *ir.UnifiedChatRequest) {
-	tc, ok := genConfig["thinkingConfig"].(map[string]any)
+func (p *GeminiProvider) adjustMaxTokensForThinking(gc map[string]any, req *ir.UnifiedChatRequest) {
+	tc, ok := gc["thinkingConfig"].(map[string]any)
 	if !ok {
 		return
 	}
-
 	var b int32
-	if level, ok := tc["thinkingLevel"].(string); ok {
-		b = int32(ir.ThinkingLevelToBudget(ir.ThinkingLevel(level)))
+	if l, ok := tc["thinkingLevel"].(string); ok {
+		b = int32(ir.ThinkingLevelToBudget(ir.ThinkingLevel(l)))
 	} else {
 		switch v := tc["thinkingBudget"].(type) {
 		case int:
@@ -1053,25 +632,22 @@ func (p *GeminiProvider) adjustMaxTokensForThinking(genConfig map[string]any, re
 			b = v
 		}
 	}
-
 	if b <= 0 {
 		return
 	}
-
-	currentMax := 0
-	switch v := genConfig["maxOutputTokens"].(type) {
+	cm := 0
+	switch v := gc["maxOutputTokens"].(type) {
 	case int:
-		currentMax = v
+		cm = v
 	case int32:
-		currentMax = int(v)
+		cm = int(v)
 	default:
 		if req.MaxTokens != nil {
-			currentMax = *req.MaxTokens
+			cm = *req.MaxTokens
 		}
 	}
-
-	newMax := max(currentMax, int(b)*2, ir.GeminiSafeMaxTokens)
-	if newMax > currentMax {
-		genConfig["maxOutputTokens"] = newMax
+	nm := max(cm, int(b)*2, ir.GeminiSafeMaxTokens)
+	if nm > cm {
+		gc["maxOutputTokens"] = nm
 	}
 }

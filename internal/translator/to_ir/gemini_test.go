@@ -673,3 +673,244 @@ func TestParseGeminiChunk_AntigravityEnvelope(t *testing.T) {
 		t.Errorf("Event content = %q, want %q", events[0].Content, "Hello")
 	}
 }
+
+// ==================== MergeConsecutiveModelThinking Tests ====================
+
+func TestMergeConsecutiveModelThinking_BasicMerge(t *testing.T) {
+	// Simulate SDK streaming chunks stored as separate Content entries
+	messages := []ir.Message{
+		{Role: ir.RoleUser, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "Hello"}}},
+		{Role: ir.RoleAssistant, Content: []ir.ContentPart{{Type: ir.ContentTypeReasoning, Reasoning: "Chunk 1..."}}},
+		{Role: ir.RoleAssistant, Content: []ir.ContentPart{{Type: ir.ContentTypeReasoning, Reasoning: "Chunk 2..."}}},
+		{Role: ir.RoleAssistant, Content: []ir.ContentPart{{Type: ir.ContentTypeReasoning, Reasoning: "Chunk 3...", ThoughtSignature: []byte("sig123")}}},
+		{Role: ir.RoleAssistant, ToolCalls: []ir.ToolCall{{ID: "tc1", Name: "read_file", Args: `{"path":"test.txt"}`}}},
+	}
+
+	result := MergeConsecutiveModelThinking(messages)
+
+	// Should have: user + merged assistant
+	if len(result) != 2 {
+		t.Fatalf("Expected 2 messages, got %d", len(result))
+	}
+
+	// Check merged message
+	merged := result[1]
+	if merged.Role != ir.RoleAssistant {
+		t.Errorf("Merged role = %q, want %q", merged.Role, ir.RoleAssistant)
+	}
+
+	// Should have 1 reasoning part with merged text
+	if len(merged.Content) != 1 {
+		t.Fatalf("Expected 1 content part, got %d", len(merged.Content))
+	}
+	if merged.Content[0].Type != ir.ContentTypeReasoning {
+		t.Errorf("Content type = %q, want %q", merged.Content[0].Type, ir.ContentTypeReasoning)
+	}
+	expectedReasoning := "Chunk 1...Chunk 2...Chunk 3..."
+	if merged.Content[0].Reasoning != expectedReasoning {
+		t.Errorf("Reasoning = %q, want %q", merged.Content[0].Reasoning, expectedReasoning)
+	}
+
+	// Signature should be preserved
+	if string(merged.Content[0].ThoughtSignature) != "sig123" {
+		t.Errorf("ThoughtSignature = %q, want %q", merged.Content[0].ThoughtSignature, "sig123")
+	}
+
+	// Tool call should be included
+	if len(merged.ToolCalls) != 1 {
+		t.Fatalf("Expected 1 tool call, got %d", len(merged.ToolCalls))
+	}
+	if merged.ToolCalls[0].Name != "read_file" {
+		t.Errorf("ToolCall.Name = %q, want %q", merged.ToolCalls[0].Name, "read_file")
+	}
+}
+
+func TestMergeConsecutiveModelThinking_RedactedThinkingOrder(t *testing.T) {
+	// Test that redacted_thinking maintains its position between reasoning chunks
+	messages := []ir.Message{
+		{Role: ir.RoleUser, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "Hello"}}},
+		{Role: ir.RoleAssistant, Content: []ir.ContentPart{{Type: ir.ContentTypeReasoning, Reasoning: "Thinking part 1"}}},
+		{Role: ir.RoleAssistant, Content: []ir.ContentPart{{Type: ir.ContentTypeRedactedThinking, RedactedData: "encrypted_data"}}},
+		{Role: ir.RoleAssistant, Content: []ir.ContentPart{{Type: ir.ContentTypeReasoning, Reasoning: "Thinking part 2", ThoughtSignature: []byte("sig")}}},
+	}
+
+	result := MergeConsecutiveModelThinking(messages)
+
+	if len(result) != 2 {
+		t.Fatalf("Expected 2 messages, got %d", len(result))
+	}
+
+	merged := result[1]
+	// Should have: reasoning1 + redacted + reasoning2
+	if len(merged.Content) != 3 {
+		t.Fatalf("Expected 3 content parts, got %d", len(merged.Content))
+	}
+
+	// Check order: reasoning, redacted, reasoning
+	if merged.Content[0].Type != ir.ContentTypeReasoning {
+		t.Errorf("Content[0].Type = %q, want %q", merged.Content[0].Type, ir.ContentTypeReasoning)
+	}
+	if merged.Content[0].Reasoning != "Thinking part 1" {
+		t.Errorf("Content[0].Reasoning = %q, want %q", merged.Content[0].Reasoning, "Thinking part 1")
+	}
+
+	if merged.Content[1].Type != ir.ContentTypeRedactedThinking {
+		t.Errorf("Content[1].Type = %q, want %q", merged.Content[1].Type, ir.ContentTypeRedactedThinking)
+	}
+	if merged.Content[1].RedactedData != "encrypted_data" {
+		t.Errorf("Content[1].RedactedData = %q, want %q", merged.Content[1].RedactedData, "encrypted_data")
+	}
+
+	if merged.Content[2].Type != ir.ContentTypeReasoning {
+		t.Errorf("Content[2].Type = %q, want %q", merged.Content[2].Type, ir.ContentTypeReasoning)
+	}
+	if merged.Content[2].Reasoning != "Thinking part 2" {
+		t.Errorf("Content[2].Reasoning = %q, want %q", merged.Content[2].Reasoning, "Thinking part 2")
+	}
+}
+
+func TestMergeConsecutiveModelThinking_TextOrderPreserved(t *testing.T) {
+	// Test that text appearing in the final message of a thinking sequence stays in correct order
+	// The text message is included because it's a "final" message following thinking-only messages
+	messages := []ir.Message{
+		{Role: ir.RoleUser, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "Hello"}}},
+		{Role: ir.RoleAssistant, Content: []ir.ContentPart{{Type: ir.ContentTypeReasoning, Reasoning: "Thinking..."}}},
+		{Role: ir.RoleAssistant, Content: []ir.ContentPart{
+			{Type: ir.ContentTypeReasoning, Reasoning: "More thinking..."},
+			{Type: ir.ContentTypeText, Text: "Response text"},
+		}},
+	}
+
+	result := MergeConsecutiveModelThinking(messages)
+
+	if len(result) != 2 {
+		t.Fatalf("Expected 2 messages, got %d", len(result))
+	}
+
+	merged := result[1]
+	// Should have: merged reasoning + text
+	if len(merged.Content) != 2 {
+		t.Fatalf("Expected 2 content parts, got %d", len(merged.Content))
+	}
+
+	if merged.Content[0].Type != ir.ContentTypeReasoning {
+		t.Errorf("Content[0].Type = %q, want %q", merged.Content[0].Type, ir.ContentTypeReasoning)
+	}
+	expectedReasoning := "Thinking...More thinking..."
+	if merged.Content[0].Reasoning != expectedReasoning {
+		t.Errorf("Content[0].Reasoning = %q, want %q", merged.Content[0].Reasoning, expectedReasoning)
+	}
+
+	if merged.Content[1].Type != ir.ContentTypeText {
+		t.Errorf("Content[1].Type = %q, want %q", merged.Content[1].Type, ir.ContentTypeText)
+	}
+	if merged.Content[1].Text != "Response text" {
+		t.Errorf("Content[1].Text = %q, want %q", merged.Content[1].Text, "Response text")
+	}
+}
+
+func TestMergeConsecutiveModelThinking_EmptyMessageInSequence(t *testing.T) {
+	// Test that empty assistant messages don't break the merge sequence
+	messages := []ir.Message{
+		{Role: ir.RoleUser, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "Hello"}}},
+		{Role: ir.RoleAssistant, Content: []ir.ContentPart{{Type: ir.ContentTypeReasoning, Reasoning: "Chunk 1"}}},
+		{Role: ir.RoleAssistant, Content: []ir.ContentPart{}}, // Empty message from SDK
+		{Role: ir.RoleAssistant, Content: []ir.ContentPart{{Type: ir.ContentTypeReasoning, Reasoning: "Chunk 2", ThoughtSignature: []byte("sig")}}},
+	}
+
+	result := MergeConsecutiveModelThinking(messages)
+
+	if len(result) != 2 {
+		t.Fatalf("Expected 2 messages, got %d", len(result))
+	}
+
+	merged := result[1]
+	// Should have merged reasoning
+	if len(merged.Content) != 1 {
+		t.Fatalf("Expected 1 content part, got %d", len(merged.Content))
+	}
+	if merged.Content[0].Reasoning != "Chunk 1Chunk 2" {
+		t.Errorf("Reasoning = %q, want %q", merged.Content[0].Reasoning, "Chunk 1Chunk 2")
+	}
+}
+
+func TestMergeConsecutiveModelThinking_NoMergeNeeded(t *testing.T) {
+	// Test that non-thinking messages are not merged
+	messages := []ir.Message{
+		{Role: ir.RoleUser, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "Hello"}}},
+		{Role: ir.RoleAssistant, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "Hi there!"}}},
+		{Role: ir.RoleUser, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "How are you?"}}},
+		{Role: ir.RoleAssistant, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "I'm good!"}}},
+	}
+
+	result := MergeConsecutiveModelThinking(messages)
+
+	// Should remain unchanged
+	if len(result) != 4 {
+		t.Fatalf("Expected 4 messages, got %d", len(result))
+	}
+}
+
+func TestMergeConsecutiveModelThinking_SignatureFromEmptyText(t *testing.T) {
+	// Test that signature from empty text part (Claude Vertex streaming) is captured
+	messages := []ir.Message{
+		{Role: ir.RoleUser, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "Hello"}}},
+		{Role: ir.RoleAssistant, Content: []ir.ContentPart{{Type: ir.ContentTypeReasoning, Reasoning: "Thinking..."}}},
+		{Role: ir.RoleAssistant, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "", ThoughtSignature: []byte("sig_from_empty")}}},
+		{Role: ir.RoleAssistant, ToolCalls: []ir.ToolCall{{ID: "tc1", Name: "test", Args: "{}"}}},
+	}
+
+	result := MergeConsecutiveModelThinking(messages)
+
+	if len(result) != 2 {
+		t.Fatalf("Expected 2 messages, got %d", len(result))
+	}
+
+	merged := result[1]
+	// Signature should be captured from the empty text part
+	if len(merged.Content) == 0 {
+		t.Fatal("Expected at least 1 content part")
+	}
+	if string(merged.Content[0].ThoughtSignature) != "sig_from_empty" {
+		t.Errorf("ThoughtSignature = %q, want %q", merged.Content[0].ThoughtSignature, "sig_from_empty")
+	}
+
+	// Tool call should also have signature applied
+	if len(merged.ToolCalls) != 1 {
+		t.Fatalf("Expected 1 tool call, got %d", len(merged.ToolCalls))
+	}
+	if string(merged.ToolCalls[0].ThoughtSignature) != "sig_from_empty" {
+		t.Errorf("ToolCall.ThoughtSignature = %q, want %q", merged.ToolCalls[0].ThoughtSignature, "sig_from_empty")
+	}
+}
+
+func TestMergeConsecutiveModelThinking_MultipleToolCalls(t *testing.T) {
+	// Test merging with multiple parallel tool calls
+	messages := []ir.Message{
+		{Role: ir.RoleUser, Content: []ir.ContentPart{{Type: ir.ContentTypeText, Text: "Hello"}}},
+		{Role: ir.RoleAssistant, Content: []ir.ContentPart{{Type: ir.ContentTypeReasoning, Reasoning: "Let me check...", ThoughtSignature: []byte("sig")}}},
+		{Role: ir.RoleAssistant, ToolCalls: []ir.ToolCall{
+			{ID: "tc1", Name: "read_file", Args: `{"path":"a.txt"}`},
+			{ID: "tc2", Name: "read_file", Args: `{"path":"b.txt"}`},
+			{ID: "tc3", Name: "read_file", Args: `{"path":"c.txt"}`},
+		}},
+	}
+
+	result := MergeConsecutiveModelThinking(messages)
+
+	if len(result) != 2 {
+		t.Fatalf("Expected 2 messages, got %d", len(result))
+	}
+
+	merged := result[1]
+	if len(merged.ToolCalls) != 3 {
+		t.Fatalf("Expected 3 tool calls, got %d", len(merged.ToolCalls))
+	}
+
+	// All tool calls should have signature applied
+	for i, tc := range merged.ToolCalls {
+		if string(tc.ThoughtSignature) != "sig" {
+			t.Errorf("ToolCall[%d].ThoughtSignature = %q, want %q", i, tc.ThoughtSignature, "sig")
+		}
+	}
+}

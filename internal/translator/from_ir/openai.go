@@ -1,4 +1,3 @@
-// Package from_ir converts unified request format to provider-specific formats.
 package from_ir
 
 import (
@@ -10,22 +9,17 @@ import (
 	"github.com/nghyane/llm-mux/internal/translator/ir"
 )
 
-// OpenAIRequestFormat specifies which OpenAI API format to generate.
 type OpenAIRequestFormat int
 
 const (
-	FormatChatCompletions OpenAIRequestFormat = iota // /v1/chat/completions - uses "messages"
-	FormatResponsesAPI                               // /v1/responses - uses "input"
+	FormatChatCompletions OpenAIRequestFormat = iota
+	FormatResponsesAPI
 )
 
-// ToOpenAIRequest converts unified request to OpenAI Chat Completions API JSON (default format).
 func ToOpenAIRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	return ToOpenAIRequestFmt(req, FormatChatCompletions)
 }
 
-// ToOpenAIRequestFmt converts unified request to specified OpenAI API format.
-// Use FormatChatCompletions for traditional /v1/chat/completions endpoint.
-// Use FormatResponsesAPI for new /v1/responses endpoint (Codex CLI, etc.).
 func ToOpenAIRequestFmt(req *ir.UnifiedChatRequest, format OpenAIRequestFormat) ([]byte, error) {
 	if format == FormatResponsesAPI {
 		return convertToResponsesAPIRequest(req)
@@ -33,13 +27,8 @@ func ToOpenAIRequestFmt(req *ir.UnifiedChatRequest, format OpenAIRequestFormat) 
 	return convertToChatCompletionsRequest(req)
 }
 
-// convertToChatCompletionsRequest builds JSON for /v1/chat/completions endpoint.
-// This is the traditional OpenAI format used by most clients (Cursor, Cline, etc.).
 func convertToChatCompletionsRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
-	m := map[string]any{
-		"model":    req.Model,
-		"messages": []any{},
-	}
+	m := map[string]any{"model": req.Model, "messages": []any{}}
 	if req.Temperature != nil {
 		m["temperature"] = *req.Temperature
 	}
@@ -53,113 +42,63 @@ func convertToChatCompletionsRequest(req *ir.UnifiedChatRequest) ([]byte, error)
 		m["stop"] = req.StopSequences
 	}
 	if req.Prediction != nil && req.Prediction.Content != "" {
-		m["prediction"] = map[string]any{
-			"type":    req.Prediction.Type,
-			"content": req.Prediction.Content,
-		}
+		m["prediction"] = map[string]any{"type": req.Prediction.Type, "content": req.Prediction.Content}
 	}
 	if req.Thinking != nil && req.Thinking.IncludeThoughts {
-		budget := 0
+		b := 0
 		if req.Thinking.ThinkingBudget != nil {
-			budget = int(*req.Thinking.ThinkingBudget)
+			b = int(*req.Thinking.ThinkingBudget)
 		}
-		m["reasoning_effort"] = ir.BudgetToEffort(budget, "auto")
+		m["reasoning_effort"] = ir.BudgetToEffort(b, "auto")
 	}
 
-	var messages []any
+	var msgs []any
 	for _, msg := range req.Messages {
-		// Special handling for RoleTool: each tool_result needs its own message
 		if msg.Role == ir.RoleTool {
-			for _, part := range msg.Content {
-				if part.Type == ir.ContentTypeToolResult && part.ToolResult != nil {
-					messages = append(messages, map[string]any{
-						"role":         "tool",
-						"tool_call_id": part.ToolResult.ToolCallID,
-						"content":      part.ToolResult.Result,
-					})
+			for _, p := range msg.Content {
+				if p.Type == ir.ContentTypeToolResult && p.ToolResult != nil {
+					msgs = append(msgs, map[string]any{"role": "tool", "tool_call_id": p.ToolResult.ToolCallID, "content": p.ToolResult.Result})
 				}
 			}
 			continue
 		}
-		if msgObj := convertMessageToOpenAI(msg); msgObj != nil {
-			messages = append(messages, msgObj)
+		if obj := convertMessageToOpenAI(msg); obj != nil {
+			msgs = append(msgs, obj)
 		}
 	}
-	m["messages"] = messages
+	m["messages"] = msgs
 
 	if req.ResponseSchema != nil {
-		responseFormat := map[string]any{
-			"type": "json_schema",
-			"json_schema": map[string]any{
-				"schema": req.ResponseSchema,
-			},
-		}
+		rf := map[string]any{"type": "json_schema", "json_schema": map[string]any{"schema": req.ResponseSchema}}
 		if req.ResponseSchemaName != "" {
-			responseFormat["json_schema"].(map[string]any)["name"] = req.ResponseSchemaName
+			rf["json_schema"].(map[string]any)["name"] = req.ResponseSchemaName
 		}
 		if req.ResponseSchemaStrict {
-			responseFormat["json_schema"].(map[string]any)["strict"] = true
+			rf["json_schema"].(map[string]any)["strict"] = true
 		}
-		m["response_format"] = responseFormat
+		m["response_format"] = rf
 	}
 
-	// Build tools array (function tools + built-in tools from metadata)
-	tools := make([]any, 0, len(req.Tools))
+	var tools []any
 	for _, t := range req.Tools {
-		params := t.Parameters
-		if params == nil {
-			params = map[string]any{"type": "object", "properties": map[string]any{}}
+		ps := t.Parameters
+		if ps == nil {
+			ps = map[string]any{"type": "object", "properties": map[string]any{}}
 		}
-		tools = append(tools, map[string]any{
-			"type": "function",
-			"function": map[string]any{
-				"name": t.Name, "description": t.Description, "parameters": params,
-			},
-		})
+		tools = append(tools, map[string]any{"type": "function", "function": map[string]any{"name": t.Name, "description": t.Description, "parameters": ps}})
 	}
 
-	// Add built-in tools from Metadata
 	if req.Metadata != nil {
-		// web_search tool
-		if gsConfig, ok := req.Metadata[ir.MetaGoogleSearch]; ok {
-			webSearchTool := map[string]any{"type": "web_search_preview"}
-			if cfg, ok := gsConfig.(map[string]any); ok {
-				if scs, ok := cfg["search_context_size"]; ok {
-					webSearchTool["search_context_size"] = scs
+		for k, mk := range map[string]string{ir.MetaGoogleSearch: "web_search_preview", ir.MetaCodeExecution: "code_interpreter", ir.MetaFileSearch: "file_search"} {
+			if cfg, ok := req.Metadata[k]; ok {
+				t := map[string]any{"type": mk}
+				if m, ok := cfg.(map[string]any); ok {
+					for ck, cv := range m {
+						t[ck] = cv
+					}
 				}
-				if ul, ok := cfg["user_location"]; ok {
-					webSearchTool["user_location"] = ul
-				}
+				tools = append(tools, t)
 			}
-			tools = append(tools, webSearchTool)
-		}
-
-		// code_interpreter tool
-		if ciConfig, ok := req.Metadata[ir.MetaCodeExecution]; ok {
-			codeInterpreterTool := map[string]any{"type": "code_interpreter"}
-			if cfg, ok := ciConfig.(map[string]any); ok {
-				if container, ok := cfg["container"]; ok {
-					codeInterpreterTool["container"] = container
-				}
-			}
-			tools = append(tools, codeInterpreterTool)
-		}
-
-		// file_search tool
-		if fsConfig, ok := req.Metadata[ir.MetaFileSearch]; ok {
-			fileSearchTool := map[string]any{"type": "file_search"}
-			if cfg, ok := fsConfig.(map[string]any); ok {
-				if vs, ok := cfg["vector_store"]; ok {
-					fileSearchTool["vector_store"] = vs
-				}
-				if mnr, ok := cfg["max_num_results"]; ok {
-					fileSearchTool["max_num_results"] = mnr
-				}
-				if ro, ok := cfg["ranking_options"]; ok {
-					fileSearchTool["ranking_options"] = ro
-				}
-			}
-			tools = append(tools, fileSearchTool)
 		}
 	}
 
@@ -168,17 +107,11 @@ func convertToChatCompletionsRequest(req *ir.UnifiedChatRequest) ([]byte, error)
 	}
 
 	if req.ToolChoice == "function" && req.ToolChoiceFunction != "" {
-		toolChoiceObj := map[string]any{
-			"type": "function",
-			"function": map[string]any{
-				"name": req.ToolChoiceFunction,
-			},
-		}
-		// GPT-5+: Add allowed_tools if specified
+		tc := map[string]any{"type": "function", "function": map[string]any{"name": req.ToolChoiceFunction}}
 		if len(req.AllowedTools) > 0 {
-			toolChoiceObj["allowed_tools"] = req.AllowedTools
+			tc["allowed_tools"] = req.AllowedTools
 		}
-		m["tool_choice"] = toolChoiceObj
+		m["tool_choice"] = tc
 	} else if req.ToolChoice != "" {
 		m["tool_choice"] = req.ToolChoice
 	}
@@ -188,47 +121,29 @@ func convertToChatCompletionsRequest(req *ir.UnifiedChatRequest) ([]byte, error)
 	if len(req.ResponseModality) > 0 {
 		m["modalities"] = req.ResponseModality
 	}
-
-	// Add audio config for OpenAI audio models (gpt-4o-audio-preview)
 	if req.AudioConfig != nil {
-		audioConfig := map[string]any{}
+		ac := map[string]any{}
 		if req.AudioConfig.Voice != "" {
-			audioConfig["voice"] = req.AudioConfig.Voice
+			ac["voice"] = req.AudioConfig.Voice
 		}
 		if req.AudioConfig.Format != "" {
-			audioConfig["format"] = req.AudioConfig.Format
+			ac["format"] = req.AudioConfig.Format
 		}
-		if len(audioConfig) > 0 {
-			m["audio"] = audioConfig
+		if len(ac) > 0 {
+			m["audio"] = ac
 		}
 	}
 
-	// Restore OpenAI-specific fields from Metadata (passthrough)
 	if req.Metadata != nil {
-		if v, ok := req.Metadata[ir.MetaOpenAILogprobs]; ok {
-			m["logprobs"] = v
+		for _, k := range []string{ir.MetaOpenAILogprobs, ir.MetaOpenAITopLogprobs, ir.MetaOpenAILogitBias, ir.MetaOpenAISeed, ir.MetaOpenAIUser, ir.MetaOpenAIFrequencyPenalty, ir.MetaOpenAIPresencePenalty} {
+			if v, ok := req.Metadata[k]; ok {
+				m[strings.TrimPrefix(k, "openai:")] = v
+			}
 		}
-		if v, ok := req.Metadata[ir.MetaOpenAITopLogprobs]; ok {
-			m["top_logprobs"] = v
-		}
-		if v, ok := req.Metadata[ir.MetaOpenAILogitBias]; ok {
-			m["logit_bias"] = v
-		}
-		if v, ok := req.Metadata[ir.MetaOpenAISeed]; ok {
-			m["seed"] = v
-		}
-		if v, ok := req.Metadata[ir.MetaOpenAIUser]; ok {
-			m["user"] = v
-		}
-		if v, ok := req.Metadata[ir.MetaOpenAIFrequencyPenalty]; ok {
-			m["frequency_penalty"] = v
-		}
-		if v, ok := req.Metadata[ir.MetaOpenAIPresencePenalty]; ok {
-			m["presence_penalty"] = v
+		if v, ok := req.Metadata["service_tier"]; ok {
+			m["service_tier"] = v
 		}
 	}
-
-	// Add service_tier if present (OpenAI-specific)
 	if req.ServiceTier != "" {
 		m["service_tier"] = string(req.ServiceTier)
 	}
@@ -236,9 +151,6 @@ func convertToChatCompletionsRequest(req *ir.UnifiedChatRequest) ([]byte, error)
 	return json.Marshal(m)
 }
 
-// convertToResponsesAPIRequest builds JSON for /v1/responses endpoint.
-// This is the new OpenAI format used by Codex CLI and newer clients.
-// Key differences: uses "input" instead of "messages", "max_output_tokens" instead of "max_tokens".
 func convertToResponsesAPIRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	m := map[string]any{"model": req.Model}
 	if req.Temperature != nil {
@@ -253,22 +165,18 @@ func convertToResponsesAPIRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	if req.Instructions != "" {
 		m["instructions"] = req.Instructions
 	}
-
-	// Add audio config for OpenAI audio models in Responses API
 	if req.AudioConfig != nil {
-		audioConfig := map[string]any{}
+		ac := map[string]any{}
 		if req.AudioConfig.Voice != "" {
-			audioConfig["voice"] = req.AudioConfig.Voice
+			ac["voice"] = req.AudioConfig.Voice
 		}
 		if req.AudioConfig.Format != "" {
-			audioConfig["format"] = req.AudioConfig.Format
+			ac["format"] = req.AudioConfig.Format
 		}
-		if len(audioConfig) > 0 {
-			m["audio"] = audioConfig
+		if len(ac) > 0 {
+			m["audio"] = ac
 		}
 	}
-
-	// Add modalities for Responses API
 	if len(req.ResponseModality) > 0 {
 		m["modalities"] = req.ResponseModality
 	}
@@ -287,109 +195,58 @@ func convertToResponsesAPIRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 	}
 
 	if req.ResponseSchema != nil {
-		responseFormat := map[string]any{
-			"type": "json_schema",
-			"json_schema": map[string]any{
-				"schema": req.ResponseSchema,
-			},
-		}
+		rf := map[string]any{"type": "json_schema", "json_schema": map[string]any{"schema": req.ResponseSchema}}
 		if req.ResponseSchemaName != "" {
-			responseFormat["json_schema"].(map[string]any)["name"] = req.ResponseSchemaName
+			rf["json_schema"].(map[string]any)["name"] = req.ResponseSchemaName
 		}
 		if req.ResponseSchemaStrict {
-			responseFormat["json_schema"].(map[string]any)["strict"] = true
+			rf["json_schema"].(map[string]any)["strict"] = true
 		}
-		m["response_format"] = responseFormat
+		m["response_format"] = rf
 	}
 
 	if req.Thinking != nil && (req.Thinking.IncludeThoughts || req.Thinking.Effort != "" || req.Thinking.Summary != "") {
-		reasoning := map[string]any{}
+		r := map[string]any{}
 		if req.Thinking.Effort != "" {
-			reasoning["effort"] = req.Thinking.Effort
+			r["effort"] = req.Thinking.Effort
 		} else if req.Thinking.IncludeThoughts {
-			budget := 0
+			b := 0
 			if req.Thinking.ThinkingBudget != nil {
-				budget = int(*req.Thinking.ThinkingBudget)
+				b = int(*req.Thinking.ThinkingBudget)
 			}
-			reasoning["effort"] = ir.BudgetToEffort(budget, "low")
+			r["effort"] = ir.BudgetToEffort(b, "low")
 		}
 		if req.Thinking.Summary != "" {
-			reasoning["summary"] = req.Thinking.Summary
+			r["summary"] = req.Thinking.Summary
 		}
-		if len(reasoning) > 0 {
-			m["reasoning"] = reasoning
+		if len(r) > 0 {
+			m["reasoning"] = r
 		}
 	}
 
-	if len(req.Tools) > 0 {
-		tools := make([]any, len(req.Tools))
-		for i, t := range req.Tools {
-			tools[i] = map[string]any{
-				"type": "function", "name": t.Name, "description": t.Description, "parameters": t.Parameters,
+	var tools []any
+	for _, t := range req.Tools {
+		tools = append(tools, map[string]any{"type": "function", "name": t.Name, "description": t.Description, "parameters": t.Parameters})
+	}
+	if req.Metadata != nil {
+		for k, mk := range map[string]string{ir.MetaGoogleSearch: "web_search_preview", ir.MetaCodeExecution: "code_interpreter", ir.MetaFileSearch: "file_search"} {
+			if cfg, ok := req.Metadata[k]; ok {
+				t := map[string]any{"type": mk}
+				if m, ok := cfg.(map[string]any); ok {
+					for ck, cv := range m {
+						t[ck] = cv
+					}
+				}
+				tools = append(tools, t)
 			}
 		}
+	}
+	if len(tools) > 0 {
 		m["tools"] = tools
 	}
 
-	// Add built-in tools from Metadata for Responses API
-	if req.Metadata != nil {
-		var builtInTools []any
-
-		// web_search tool
-		if gsConfig, ok := req.Metadata[ir.MetaGoogleSearch]; ok {
-			webSearchTool := map[string]any{"type": "web_search_preview"}
-			if cfg, ok := gsConfig.(map[string]any); ok {
-				if scs, ok := cfg["search_context_size"]; ok {
-					webSearchTool["search_context_size"] = scs
-				}
-				if ul, ok := cfg["user_location"]; ok {
-					webSearchTool["user_location"] = ul
-				}
-			}
-			builtInTools = append(builtInTools, webSearchTool)
-		}
-
-		// code_interpreter tool
-		if ciConfig, ok := req.Metadata[ir.MetaCodeExecution]; ok {
-			codeInterpreterTool := map[string]any{"type": "code_interpreter"}
-			if cfg, ok := ciConfig.(map[string]any); ok {
-				if container, ok := cfg["container"]; ok {
-					codeInterpreterTool["container"] = container
-				}
-			}
-			builtInTools = append(builtInTools, codeInterpreterTool)
-		}
-
-		// file_search tool
-		if fsConfig, ok := req.Metadata[ir.MetaFileSearch]; ok {
-			fileSearchTool := map[string]any{"type": "file_search"}
-			if cfg, ok := fsConfig.(map[string]any); ok {
-				if vs, ok := cfg["vector_store"]; ok {
-					fileSearchTool["vector_store"] = vs
-				}
-				if mnr, ok := cfg["max_num_results"]; ok {
-					fileSearchTool["max_num_results"] = mnr
-				}
-				if ro, ok := cfg["ranking_options"]; ok {
-					fileSearchTool["ranking_options"] = ro
-				}
-			}
-			builtInTools = append(builtInTools, fileSearchTool)
-		}
-
-		if len(builtInTools) > 0 {
-			existingTools, _ := m["tools"].([]any)
-			m["tools"] = append(existingTools, builtInTools...)
-		}
-	}
-
 	if req.ToolChoice == "function" && req.ToolChoiceFunction != "" {
-		m["tool_choice"] = map[string]any{
-			"type": "function",
-			"function": map[string]any{
-				"name": req.ToolChoiceFunction,
-			},
-		}
+		m["tool_choice"] = map[string]any{"type": "function", "function": map[string]any{"name": req.ToolChoiceFunction}}
 	} else if req.ToolChoice != "" {
 		m["tool_choice"] = req.ToolChoice
 	}
@@ -400,14 +257,14 @@ func convertToResponsesAPIRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 		m["previous_response_id"] = req.PreviousResponseID
 	}
 	if req.PromptID != "" {
-		prompt := map[string]any{"id": req.PromptID}
+		p := map[string]any{"id": req.PromptID}
 		if req.PromptVersion != "" {
-			prompt["version"] = req.PromptVersion
+			p["version"] = req.PromptVersion
 		}
 		if len(req.PromptVariables) > 0 {
-			prompt["variables"] = req.PromptVariables
+			p["variables"] = req.PromptVariables
 		}
-		m["prompt"] = prompt
+		m["prompt"] = p
 	}
 	if req.PromptCacheKey != "" {
 		m["prompt_cache_key"] = req.PromptCacheKey
@@ -422,39 +279,27 @@ func convertToResponsesAPIRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
 func convertMessageToResponsesInput(msg ir.Message) any {
 	switch msg.Role {
 	case ir.RoleSystem:
-		if text := ir.CombineTextParts(msg); text != "" {
-			return map[string]any{
-				"type": "message", "role": "system",
-				"content": []any{map[string]any{"type": "input_text", "text": text}},
-			}
+		if t := ir.CombineTextParts(msg); t != "" {
+			return map[string]any{"type": "message", "role": "system", "content": []any{map[string]any{"type": "input_text", "text": t}}}
 		}
 	case ir.RoleUser:
 		return buildResponsesUserMessage(msg)
 	case ir.RoleAssistant:
 		if len(msg.ToolCalls) > 0 {
 			tc := msg.ToolCalls[0]
-			return map[string]any{
-				"type": "function_call", "call_id": tc.ID, "name": tc.Name, "arguments": tc.Args,
-			}
+			return map[string]any{"type": "function_call", "call_id": tc.ID, "name": tc.Name, "arguments": tc.Args}
 		}
-		if text := ir.CombineTextParts(msg); text != "" {
-			return map[string]any{
-				"type": "message", "role": "assistant",
-				"content": []any{map[string]any{"type": "output_text", "text": text}},
-			}
+		if t := ir.CombineTextParts(msg); t != "" {
+			return map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": t}}}
 		}
 	case ir.RoleTool:
-		for _, part := range msg.Content {
-			if part.Type == ir.ContentTypeToolResult && part.ToolResult != nil {
-				output := part.ToolResult.Result
-				result := map[string]any{
-					"type": "function_call_output", "call_id": part.ToolResult.ToolCallID, "output": output,
+		for _, p := range msg.Content {
+			if p.Type == ir.ContentTypeToolResult && p.ToolResult != nil {
+				res := map[string]any{"type": "function_call_output", "call_id": p.ToolResult.ToolCallID, "output": p.ToolResult.Result}
+				if p.ToolResult.IsError {
+					res["is_error"] = true
 				}
-				// Responses API supports is_error field
-				if part.ToolResult.IsError {
-					result["is_error"] = true
-				}
-				return result
+				return res
 			}
 		}
 	}
@@ -462,293 +307,239 @@ func convertMessageToResponsesInput(msg ir.Message) any {
 }
 
 func buildResponsesUserMessage(msg ir.Message) any {
-	var content []any
-	for _, part := range msg.Content {
-		switch part.Type {
+	var c []any
+	for _, p := range msg.Content {
+		switch p.Type {
 		case ir.ContentTypeText:
-			if part.Text != "" {
-				content = append(content, map[string]any{"type": "input_text", "text": part.Text})
+			if p.Text != "" {
+				c = append(c, map[string]any{"type": "input_text", "text": p.Text})
 			}
 		case ir.ContentTypeImage:
-			if part.Image != nil {
-				if part.Image.URL != "" {
-					content = append(content, map[string]any{"type": "input_image", "image_url": part.Image.URL})
-				} else if part.Image.Data != "" {
-					content = append(content, map[string]any{
-						"type": "input_image", "image_url": fmt.Sprintf("data:%s;base64,%s", part.Image.MimeType, part.Image.Data),
-					})
+			if p.Image != nil {
+				if p.Image.URL != "" {
+					c = append(c, map[string]any{"type": "input_image", "image_url": p.Image.URL})
+				} else if p.Image.Data != "" {
+					c = append(c, map[string]any{"type": "input_image", "image_url": fmt.Sprintf("data:%s;base64,%s", p.Image.MimeType, p.Image.Data)})
 				}
 			}
 		case ir.ContentTypeFile:
-			if part.File != nil {
-				fileItem := map[string]any{"type": "input_file"}
-				if part.File.FileID != "" {
-					fileItem["file_id"] = part.File.FileID
+			if p.File != nil {
+				i := map[string]any{"type": "input_file"}
+				if p.File.FileID != "" {
+					i["file_id"] = p.File.FileID
 				}
-				if part.File.FileURL != "" {
-					fileItem["file_url"] = part.File.FileURL
+				if p.File.FileURL != "" {
+					i["file_url"] = p.File.FileURL
 				}
-				if part.File.Filename != "" {
-					fileItem["filename"] = part.File.Filename
+				if p.File.Filename != "" {
+					i["filename"] = p.File.Filename
 				}
-				if part.File.FileData != "" {
-					fileItem["file_data"] = part.File.FileData
+				if p.File.FileData != "" {
+					i["file_data"] = p.File.FileData
 				}
-				content = append(content, fileItem)
+				c = append(c, i)
 			}
 		case ir.ContentTypeAudio:
-			// Audio input for Responses API
-			if part.Audio != nil && part.Audio.Data != "" {
-				inputAudio := map[string]any{
-					"data": part.Audio.Data,
+			if p.Audio != nil && p.Audio.Data != "" {
+				ia := map[string]any{"data": p.Audio.Data}
+				if p.Audio.Format != "" {
+					ia["format"] = p.Audio.Format
 				}
-				if part.Audio.Format != "" {
-					inputAudio["format"] = part.Audio.Format
-				}
-				content = append(content, map[string]any{
-					"type":        "input_audio",
-					"input_audio": inputAudio,
-				})
+				c = append(c, map[string]any{"type": "input_audio", "input_audio": ia})
 			}
 		}
 	}
-	if len(content) == 0 {
+	if len(c) == 0 {
 		return nil
 	}
-	return map[string]any{"type": "message", "role": "user", "content": content}
+	return map[string]any{"type": "message", "role": "user", "content": c}
 }
 
-// ToOpenAIChatCompletion converts messages to OpenAI chat completion response.
-func ToOpenAIChatCompletion(messages []ir.Message, usage *ir.Usage, model, messageID string) ([]byte, error) {
-	return ToOpenAIChatCompletionMeta(messages, usage, model, messageID, nil)
+func ToOpenAIChatCompletion(ms []ir.Message, us *ir.Usage, model, mid string) ([]byte, error) {
+	return ToOpenAIChatCompletionMeta(ms, us, model, mid, nil)
 }
 
-// ToOpenAIChatCompletionCandidates converts multiple candidates to OpenAI chat completion with multiple choices.
-func ToOpenAIChatCompletionCandidates(candidates []ir.CandidateResult, usage *ir.Usage, model, messageID string, meta *ir.OpenAIMeta) ([]byte, error) {
-	responseID, created := messageID, time.Now().Unix()
+func ToOpenAIChatCompletionCandidates(cs []ir.CandidateResult, us *ir.Usage, model, mid string, meta *ir.OpenAIMeta) ([]byte, error) {
+	rid, cr := mid, time.Now().Unix()
 	if meta != nil {
 		if meta.ResponseID != "" {
-			responseID = meta.ResponseID
+			rid = meta.ResponseID
 		}
 		if meta.CreateTime > 0 {
-			created = meta.CreateTime
+			cr = meta.CreateTime
 		}
 	}
-
-	response := map[string]any{
-		"id": responseID, "object": "chat.completion", "created": created, "model": model, "choices": []any{},
-	}
-
-	// Add service_tier if present
+	res := map[string]any{"id": rid, "object": "chat.completion", "created": cr, "model": model, "choices": []any{}}
 	if meta != nil && meta.ServiceTier != "" {
-		response["service_tier"] = meta.ServiceTier
+		res["service_tier"] = meta.ServiceTier
 	}
-
-	choices := make([]any, 0, len(candidates))
-	for _, candidate := range candidates {
-		if len(candidate.Messages) == 0 {
+	var chs []any
+	for _, c := range cs {
+		if len(c.Messages) == 0 {
 			continue
 		}
-
-		builder := ir.NewResponseBuilder(candidate.Messages, usage, model, false)
-		msg := builder.GetLastMessage()
-		if msg == nil {
+		b := ir.NewResponseBuilder(c.Messages, us, model, false)
+		m := b.GetLastMessage()
+		if m == nil {
 			continue
 		}
-
-		msgContent := map[string]any{"role": string(msg.Role)}
-		text := builder.GetTextContent()
-		tcs := builder.BuildOpenAIToolCalls()
-		if text != "" {
-			msgContent["content"] = text
+		mc := map[string]any{"role": string(m.Role)}
+		t, tcs := b.GetTextContent(), b.BuildOpenAIToolCalls()
+		if t != "" {
+			mc["content"] = t
 		} else if tcs != nil {
-			// OpenAI spec: content must be null (not omitted) when tool_calls present
-			msgContent["content"] = nil
+			mc["content"] = nil
 		}
-		if reasoning := builder.GetReasoningContent(); reasoning != "" {
-			ir.AddReasoningToMessage(msgContent, reasoning, "")
+		if r := b.GetReasoningContent(); r != "" {
+			ir.AddReasoningToMessage(mc, r, "")
 		}
 		if tcs != nil {
-			msgContent["tool_calls"] = tcs
+			mc["tool_calls"] = tcs
 		}
-
-		choiceObj := map[string]any{
-			"index": candidate.Index, "finish_reason": ir.MapFinishReasonToOpenAI(candidate.FinishReason), "message": msgContent,
+		co := map[string]any{"index": c.Index, "finish_reason": ir.MapFinishReasonToOpenAI(c.FinishReason), "message": mc}
+		if c.Logprobs != nil {
+			co["logprobs"] = c.Logprobs
 		}
-		if candidate.Logprobs != nil {
-			choiceObj["logprobs"] = candidate.Logprobs
-		}
-		choices = append(choices, choiceObj)
+		chs = append(chs, co)
 	}
-
-	response["choices"] = choices
-
-	if usage != nil {
-		usageMap := map[string]any{
-			"prompt_tokens": usage.PromptTokens, "completion_tokens": usage.CompletionTokens, "total_tokens": usage.TotalTokens,
-		}
-		// Add prompt_tokens_details if available
-		if usage.PromptTokensDetails != nil {
-			promptDetails := map[string]any{}
-			if usage.PromptTokensDetails.CachedTokens > 0 {
-				promptDetails["cached_tokens"] = usage.PromptTokensDetails.CachedTokens
-			}
-			if usage.PromptTokensDetails.AudioTokens > 0 {
-				promptDetails["audio_tokens"] = usage.PromptTokensDetails.AudioTokens
-			}
-			if len(promptDetails) > 0 {
-				usageMap["prompt_tokens_details"] = promptDetails
-			}
-		}
-		// Add completion_tokens_details
-		var thoughtsTokens int32
-		if meta != nil && meta.ThoughtsTokenCount > 0 {
-			thoughtsTokens = meta.ThoughtsTokenCount
-		} else if usage.ThoughtsTokenCount > 0 {
-			thoughtsTokens = usage.ThoughtsTokenCount
-		}
-		completionDetails := map[string]any{}
-		if thoughtsTokens > 0 {
-			completionDetails["reasoning_tokens"] = thoughtsTokens
-		}
-		if usage.CompletionTokensDetails != nil {
-			if usage.CompletionTokensDetails.AudioTokens > 0 {
-				completionDetails["audio_tokens"] = usage.CompletionTokensDetails.AudioTokens
-			}
-			if usage.CompletionTokensDetails.AcceptedPredictionTokens > 0 {
-				completionDetails["accepted_prediction_tokens"] = usage.CompletionTokensDetails.AcceptedPredictionTokens
-			}
-			if usage.CompletionTokensDetails.RejectedPredictionTokens > 0 {
-				completionDetails["rejected_prediction_tokens"] = usage.CompletionTokensDetails.RejectedPredictionTokens
-			}
-		}
-		if len(completionDetails) > 0 {
-			usageMap["completion_tokens_details"] = completionDetails
-		}
-		response["usage"] = usageMap
+	res["choices"] = chs
+	if us != nil {
+		res["usage"] = buildUsageMap(us, meta)
 	}
-
-	// Add grounding metadata from meta or first candidate with grounding
 	if meta != nil && meta.GroundingMetadata != nil {
-		response["grounding_metadata"] = buildOpenAIGroundingMetadata(meta.GroundingMetadata)
+		res["grounding_metadata"] = buildOpenAIGroundingMetadata(meta.GroundingMetadata)
 	} else {
-		for _, candidate := range candidates {
-			if candidate.GroundingMetadata != nil {
-				response["grounding_metadata"] = buildOpenAIGroundingMetadata(candidate.GroundingMetadata)
+		for _, c := range cs {
+			if c.GroundingMetadata != nil {
+				res["grounding_metadata"] = buildOpenAIGroundingMetadata(c.GroundingMetadata)
 				break
 			}
 		}
 	}
-
-	return json.Marshal(response)
+	return json.Marshal(res)
 }
 
-func ToOpenAIChatCompletionMeta(messages []ir.Message, usage *ir.Usage, model, messageID string, meta *ir.OpenAIMeta) ([]byte, error) {
-	builder := ir.NewResponseBuilder(messages, usage, model, false)
-	responseID, created := messageID, time.Now().Unix()
+func ToOpenAIChatCompletionMeta(ms []ir.Message, us *ir.Usage, model, mid string, meta *ir.OpenAIMeta) ([]byte, error) {
+	b := ir.NewResponseBuilder(ms, us, model, false)
+	rid, cr := mid, time.Now().Unix()
 	if meta != nil {
 		if meta.ResponseID != "" {
-			responseID = meta.ResponseID
+			rid = meta.ResponseID
 		}
 		if meta.CreateTime > 0 {
-			created = meta.CreateTime
+			cr = meta.CreateTime
 		}
 	}
-
-	response := map[string]any{
-		"id": responseID, "object": "chat.completion", "created": created, "model": model, "choices": []any{},
-	}
-
-	// Add service_tier if present
+	res := map[string]any{"id": rid, "object": "chat.completion", "created": cr, "model": model, "choices": []any{}}
 	if meta != nil && meta.ServiceTier != "" {
-		response["service_tier"] = meta.ServiceTier
+		res["service_tier"] = meta.ServiceTier
 	}
-
-	if msg := builder.GetLastMessage(); msg != nil {
-		msgContent := map[string]any{"role": string(msg.Role)}
-		text := builder.GetTextContent()
-		tcs := builder.BuildOpenAIToolCalls()
-		if text != "" {
-			msgContent["content"] = text
+	if m := b.GetLastMessage(); m != nil {
+		mc := map[string]any{"role": string(m.Role)}
+		t, tcs := b.GetTextContent(), b.BuildOpenAIToolCalls()
+		if t != "" {
+			mc["content"] = t
 		} else if tcs != nil {
-			// OpenAI spec: content must be null (not omitted) when tool_calls present
-			msgContent["content"] = nil
+			mc["content"] = nil
 		}
-		if reasoning := builder.GetReasoningContent(); reasoning != "" {
-			ir.AddReasoningToMessage(msgContent, reasoning, "")
+		if r := b.GetReasoningContent(); r != "" {
+			ir.AddReasoningToMessage(mc, r, "")
 		}
 		if tcs != nil {
-			msgContent["tool_calls"] = tcs
+			mc["tool_calls"] = tcs
 		}
-
-		// Add audio output if present (gpt-4o-audio-preview)
-		if audioPart := findAudioContent(msg); audioPart != nil {
-			audioObj := map[string]any{}
-			if audioPart.ID != "" {
-				audioObj["id"] = audioPart.ID
+		if ap := findAudioContent(*m); ap != nil {
+			ao := map[string]any{}
+			if ap.ID != "" {
+				ao["id"] = ap.ID
 			}
-			if audioPart.Data != "" {
-				audioObj["data"] = audioPart.Data
+			if ap.Data != "" {
+				ao["data"] = ap.Data
 			}
-			if audioPart.Transcript != "" {
-				audioObj["transcript"] = audioPart.Transcript
+			if ap.Transcript != "" {
+				ao["transcript"] = ap.Transcript
 			}
-			if audioPart.ExpiresAt > 0 {
-				audioObj["expires_at"] = audioPart.ExpiresAt
+			if ap.ExpiresAt > 0 {
+				ao["expires_at"] = ap.ExpiresAt
 			}
-			if len(audioObj) > 0 {
-				msgContent["audio"] = audioObj
+			if len(ao) > 0 {
+				mc["audio"] = ao
 			}
 		}
-
-		choiceObj := map[string]any{
-			"index": 0, "finish_reason": builder.DetermineFinishReason(), "message": msgContent,
+		co := map[string]any{"index": 0, "finish_reason": b.DetermineFinishReason(), "message": mc}
+		if meta != nil {
+			if meta.NativeFinishReason != "" {
+				co["native_finish_reason"] = meta.NativeFinishReason
+			}
+			if meta.Logprobs != nil {
+				co["logprobs"] = meta.Logprobs
+			}
 		}
-		if meta != nil && meta.NativeFinishReason != "" {
-			choiceObj["native_finish_reason"] = meta.NativeFinishReason
-		}
-		if meta != nil && meta.Logprobs != nil {
-			choiceObj["logprobs"] = meta.Logprobs
-		}
-		response["choices"] = []any{choiceObj}
+		res["choices"] = []any{co}
 	}
-
-	if usageMap := builder.BuildUsageMap(); usageMap != nil {
-		// Merge reasoning tokens into completion_tokens_details if not already present
-		var thoughtsTokens int32
-		if meta != nil && meta.ThoughtsTokenCount > 0 {
-			thoughtsTokens = meta.ThoughtsTokenCount
-		} else if usage != nil && usage.ThoughtsTokenCount > 0 {
-			thoughtsTokens = usage.ThoughtsTokenCount
-		}
-		if thoughtsTokens > 0 {
-			if completionDetails, ok := usageMap["completion_tokens_details"].(map[string]any); ok {
-				if _, hasReasoningTokens := completionDetails["reasoning_tokens"]; !hasReasoningTokens {
-					completionDetails["reasoning_tokens"] = thoughtsTokens
-				}
-			} else if thoughtsTokens > 0 {
-				usageMap["completion_tokens_details"] = map[string]any{"reasoning_tokens": thoughtsTokens}
-			}
-		}
-		response["usage"] = usageMap
+	if us != nil {
+		res["usage"] = buildUsageMap(us, meta)
 	}
-
-	// Add grounding metadata if present (for Google Search grounding)
 	if meta != nil && meta.GroundingMetadata != nil {
-		response["grounding_metadata"] = buildOpenAIGroundingMetadata(meta.GroundingMetadata)
+		res["grounding_metadata"] = buildOpenAIGroundingMetadata(meta.GroundingMetadata)
 	}
-
-	return json.Marshal(response)
+	return json.Marshal(res)
 }
 
-// ToOpenAIChunk converts event to OpenAI SSE streaming chunk.
-// ToOpenAIChunk converts event to OpenAI SSE streaming chunk.
-func ToOpenAIChunk(event ir.UnifiedEvent, model, messageID string, chunkIndex int) ([]byte, error) {
-	return ToOpenAIChunkMeta(event, model, messageID, chunkIndex, nil)
+func buildUsageMap(us *ir.Usage, meta *ir.OpenAIMeta) map[string]any {
+	um := map[string]any{"prompt_tokens": us.PromptTokens, "completion_tokens": us.CompletionTokens, "total_tokens": us.TotalTokens}
+	pd := map[string]any{}
+	if us.PromptTokensDetails != nil {
+		if us.PromptTokensDetails.CachedTokens > 0 {
+			pd["cached_tokens"] = us.PromptTokensDetails.CachedTokens
+		}
+		if us.PromptTokensDetails.AudioTokens > 0 {
+			pd["audio_tokens"] = us.PromptTokensDetails.AudioTokens
+		}
+	} else if us.CachedTokens > 0 {
+		pd["cached_tokens"] = us.CachedTokens
+	}
+	if len(pd) > 0 {
+		um["prompt_tokens_details"] = pd
+	}
+	cd := map[string]any{}
+	var tt int32
+	if meta != nil && meta.ThoughtsTokenCount > 0 {
+		tt = meta.ThoughtsTokenCount
+	} else if us.ThoughtsTokenCount > 0 {
+		tt = us.ThoughtsTokenCount
+	}
+	if tt > 0 {
+		cd["reasoning_tokens"] = tt
+	}
+	if us.CompletionTokensDetails != nil {
+		if us.CompletionTokensDetails.AudioTokens > 0 {
+			cd["audio_tokens"] = us.CompletionTokensDetails.AudioTokens
+		}
+		if us.CompletionTokensDetails.AcceptedPredictionTokens > 0 {
+			cd["accepted_prediction_tokens"] = us.CompletionTokensDetails.AcceptedPredictionTokens
+		}
+		if us.CompletionTokensDetails.RejectedPredictionTokens > 0 {
+			cd["rejected_prediction_tokens"] = us.CompletionTokensDetails.RejectedPredictionTokens
+		}
+	} else {
+		if us.AcceptedPredictionTokens > 0 {
+			cd["accepted_prediction_tokens"] = us.AcceptedPredictionTokens
+		}
+		if us.RejectedPredictionTokens > 0 {
+			cd["rejected_prediction_tokens"] = us.RejectedPredictionTokens
+		}
+	}
+	if len(cd) > 0 {
+		um["completion_tokens_details"] = cd
+	}
+	return um
 }
 
-// openaiTextChunk is optimized struct for the most common case: text token streaming.
-// Using a fixed struct allows faster JSON encoding than map[string]any.
+func ToOpenAIChunk(ev ir.UnifiedEvent, model, mid string, ci int) ([]byte, error) {
+	return ToOpenAIChunkMeta(ev, model, mid, ci, nil)
+}
+
 type openaiTextChunk struct {
 	ID      string `json:"id"`
 	Object  string `json:"object"`
@@ -763,756 +554,461 @@ type openaiTextChunk struct {
 	} `json:"choices"`
 }
 
-// ToOpenAIChunkMeta converts event to OpenAI SSE streaming chunk with metadata.
-// Optimized for the hot path (text tokens) using typed struct instead of map.
-func ToOpenAIChunkMeta(event ir.UnifiedEvent, model, messageID string, chunkIndex int, meta *ir.OpenAIMeta) ([]byte, error) {
-	responseID, created := messageID, time.Now().Unix()
+func ToOpenAIChunkMeta(ev ir.UnifiedEvent, model, mid string, ci int, meta *ir.OpenAIMeta) ([]byte, error) {
+	rid, cr := mid, time.Now().Unix()
 	if meta != nil {
 		if meta.ResponseID != "" {
-			responseID = meta.ResponseID
+			rid = meta.ResponseID
 		}
 		if meta.CreateTime > 0 {
-			created = meta.CreateTime
+			cr = meta.CreateTime
 		}
 	}
-
-	// Fast path: simple text token (most common case ~90% of chunks)
-	if event.Type == ir.EventTypeToken && event.Content != "" && event.Refusal == "" &&
-		event.Logprobs == nil && event.SystemFingerprint == "" {
-		chunk := openaiTextChunk{
-			ID:      responseID,
-			Object:  "chat.completion.chunk",
-			Created: created,
-			Model:   model,
-			Choices: make([]struct {
-				Index int `json:"index"`
-				Delta struct {
-					Role    string `json:"role,omitempty"`
-					Content string `json:"content,omitempty"`
-				} `json:"delta"`
-			}, 1),
-		}
-		chunk.Choices[0].Delta.Role = "assistant"
-		chunk.Choices[0].Delta.Content = event.Content
-		jsonBytes, err := json.Marshal(chunk)
-		if err != nil {
-			return nil, err
-		}
-		return ir.BuildSSEChunk(jsonBytes), nil
+	if ev.Type == ir.EventTypeToken && ev.Content != "" && ev.Refusal == "" && ev.Logprobs == nil && ev.SystemFingerprint == "" {
+		ch := openaiTextChunk{ID: rid, Object: "chat.completion.chunk", Created: cr, Model: model, Choices: make([]struct {
+			Index int `json:"index"`
+			Delta struct {
+				Role    string `json:"role,omitempty"`
+				Content string `json:"content,omitempty"`
+			} `json:"delta"`
+		}, 1)}
+		ch.Choices[0].Delta.Role, ch.Choices[0].Delta.Content = "assistant", ev.Content
+		jb, _ := json.Marshal(ch)
+		return ir.BuildSSEChunk(jb), nil
 	}
-
-	// Slow path: complex events (tool calls, finish, etc.)
-	chunk := map[string]any{
-		"id": responseID, "object": "chat.completion.chunk", "created": created, "model": model, "choices": []any{},
+	ch := map[string]any{"id": rid, "object": "chat.completion.chunk", "created": cr, "model": model, "choices": []any{}}
+	if ev.SystemFingerprint != "" {
+		ch["system_fingerprint"] = ev.SystemFingerprint
 	}
-	if event.SystemFingerprint != "" {
-		chunk["system_fingerprint"] = event.SystemFingerprint
-	}
-
-	choice := map[string]any{"index": 0, "delta": map[string]any{}}
-
-	switch event.Type {
+	c := map[string]any{"index": 0, "delta": map[string]any{}}
+	switch ev.Type {
 	case ir.EventTypeToken:
-		delta := map[string]any{"role": "assistant"}
-		if event.Content != "" {
-			delta["content"] = event.Content
+		d := map[string]any{"role": "assistant"}
+		if ev.Content != "" {
+			d["content"] = ev.Content
 		}
-		if event.Refusal != "" {
-			delta["refusal"] = event.Refusal
+		if ev.Refusal != "" {
+			d["refusal"] = ev.Refusal
 		}
-		choice["delta"] = delta
+		c["delta"] = d
 	case ir.EventTypeReasoning:
-		choice["delta"] = ir.BuildReasoningDelta(event.Reasoning, string(event.ThoughtSignature))
+		c["delta"] = ir.BuildReasoningDelta(ev.Reasoning, string(ev.ThoughtSignature))
 	case ir.EventTypeToolCall:
-		if event.ToolCall != nil {
-			tcMap := map[string]any{
-				"index": chunkIndex, "id": event.ToolCall.ID, "type": "function",
-				"function": map[string]any{"name": event.ToolCall.Name, "arguments": event.ToolCall.Args},
-			}
-			// Inject thought_signature for Gemini 3 compatibility
-			// Use event.ThoughtSignature (from event metadata) or fallback to ToolCall.ThoughtSignature
-			ts := event.ThoughtSignature
+		if ev.ToolCall != nil {
+			tm := map[string]any{"index": ci, "id": ev.ToolCall.ID, "type": "function", "function": map[string]any{"name": ev.ToolCall.Name, "arguments": ev.ToolCall.Args}}
+			ts := ev.ThoughtSignature
 			if len(ts) == 0 {
-				ts = event.ToolCall.ThoughtSignature
+				ts = ev.ToolCall.ThoughtSignature
 			}
 			if len(ts) > 0 {
-				tcMap["extra_content"] = map[string]any{
-					"google": map[string]any{
-						"thought_signature": string(ts),
-					},
-				}
+				tm["extra_content"] = map[string]any{"google": map[string]any{"thought_signature": string(ts)}}
 			}
-
-			choice["delta"] = map[string]any{
-				"role": "assistant",
-				"tool_calls": []any{
-					tcMap,
-				},
-			}
+			c["delta"] = map[string]any{"role": "assistant", "tool_calls": []any{tm}}
 		}
 	case ir.EventTypeImage:
-		if event.Image != nil {
-			choice["delta"] = map[string]any{
-				"role": "assistant",
-				"images": []any{
-					map[string]any{
-						"type": "image_url",
-						"image_url": map[string]string{
-							"url": fmt.Sprintf("data:%s;base64,%s", event.Image.MimeType, event.Image.Data),
-						},
-					},
-				},
-			}
+		if ev.Image != nil {
+			c["delta"] = map[string]any{"role": "assistant", "images": []any{map[string]any{"type": "image_url", "image_url": map[string]string{"url": fmt.Sprintf("data:%s;base64,%s", ev.Image.MimeType, ev.Image.Data)}}}}
 		}
 	case ir.EventTypeAudio:
-		// Audio streaming output for gpt-4o-audio-preview
-		if event.Audio != nil {
-			audioObj := map[string]any{}
-			if event.Audio.ID != "" {
-				audioObj["id"] = event.Audio.ID
+		if ev.Audio != nil {
+			ao := map[string]any{}
+			if ev.Audio.ID != "" {
+				ao["id"] = ev.Audio.ID
 			}
-			if event.Audio.Data != "" {
-				audioObj["data"] = event.Audio.Data
+			if ev.Audio.Data != "" {
+				ao["data"] = ev.Audio.Data
 			}
-			if event.Audio.Transcript != "" {
-				audioObj["transcript"] = event.Audio.Transcript
+			if ev.Audio.Transcript != "" {
+				ao["transcript"] = ev.Audio.Transcript
 			}
-			if event.Audio.ExpiresAt > 0 {
-				audioObj["expires_at"] = event.Audio.ExpiresAt
+			if ev.Audio.ExpiresAt > 0 {
+				ao["expires_at"] = ev.Audio.ExpiresAt
 			}
-			choice["delta"] = map[string]any{
-				"role":  "assistant",
-				"audio": audioObj,
-			}
+			c["delta"] = map[string]any{"role": "assistant", "audio": ao}
 		}
 	case ir.EventTypeFinish:
-		choice["finish_reason"] = ir.MapFinishReasonToOpenAI(event.FinishReason)
+		c["finish_reason"] = ir.MapFinishReasonToOpenAI(ev.FinishReason)
 		if meta != nil && meta.NativeFinishReason != "" {
-			choice["native_finish_reason"] = meta.NativeFinishReason
+			c["native_finish_reason"] = meta.NativeFinishReason
 		}
-		if event.Logprobs != nil {
-			choice["logprobs"] = event.Logprobs
+		if ev.Logprobs != nil {
+			c["logprobs"] = ev.Logprobs
 		}
-		if event.ContentFilter != nil {
-			choice["content_filter_results"] = event.ContentFilter
+		if ev.ContentFilter != nil {
+			c["content_filter_results"] = ev.ContentFilter
 		}
-
-		if event.Usage != nil {
-			usageMap := map[string]any{
-				"prompt_tokens": event.Usage.PromptTokens, "completion_tokens": event.Usage.CompletionTokens, "total_tokens": event.Usage.TotalTokens,
-			}
-
-			promptDetails := map[string]any{}
-			// Use structured PromptTokensDetails if available
-			if event.Usage.PromptTokensDetails != nil {
-				if event.Usage.PromptTokensDetails.CachedTokens > 0 {
-					promptDetails["cached_tokens"] = event.Usage.PromptTokensDetails.CachedTokens
-				}
-				if event.Usage.PromptTokensDetails.AudioTokens > 0 {
-					promptDetails["audio_tokens"] = event.Usage.PromptTokensDetails.AudioTokens
-				}
-			} else {
-				// Fall back to flat fields for backward compatibility
-				if event.Usage.CachedTokens > 0 {
-					promptDetails["cached_tokens"] = event.Usage.CachedTokens
-				}
-				if event.Usage.AudioTokens > 0 {
-					promptDetails["audio_tokens"] = event.Usage.AudioTokens
-				}
-			}
-			if len(promptDetails) > 0 {
-				usageMap["prompt_tokens_details"] = promptDetails
-			}
-
-			completionDetails := map[string]any{}
-			// Use structured CompletionTokensDetails if available
-			if event.Usage.CompletionTokensDetails != nil {
-				if event.Usage.CompletionTokensDetails.ReasoningTokens > 0 {
-					completionDetails["reasoning_tokens"] = event.Usage.CompletionTokensDetails.ReasoningTokens
-				}
-				if event.Usage.CompletionTokensDetails.AudioTokens > 0 {
-					completionDetails["audio_tokens"] = event.Usage.CompletionTokensDetails.AudioTokens
-				}
-				if event.Usage.CompletionTokensDetails.AcceptedPredictionTokens > 0 {
-					completionDetails["accepted_prediction_tokens"] = event.Usage.CompletionTokensDetails.AcceptedPredictionTokens
-				}
-				if event.Usage.CompletionTokensDetails.RejectedPredictionTokens > 0 {
-					completionDetails["rejected_prediction_tokens"] = event.Usage.CompletionTokensDetails.RejectedPredictionTokens
-				}
-			}
-
-			// Also handle reasoning tokens from meta and flat fields
-			var thoughtsTokens int32
-			if meta != nil && meta.ThoughtsTokenCount > 0 {
-				thoughtsTokens = meta.ThoughtsTokenCount
-			} else if event.Usage.ThoughtsTokenCount > 0 {
-				thoughtsTokens = event.Usage.ThoughtsTokenCount
-			}
-			if thoughtsTokens > 0 && completionDetails["reasoning_tokens"] == nil {
-				completionDetails["reasoning_tokens"] = thoughtsTokens
-			}
-
-			// Backward compatibility: add flat fields if they exist but aren't in details
-			if event.Usage.AcceptedPredictionTokens > 0 && completionDetails["accepted_prediction_tokens"] == nil {
-				completionDetails["accepted_prediction_tokens"] = event.Usage.AcceptedPredictionTokens
-			}
-			if event.Usage.RejectedPredictionTokens > 0 && completionDetails["rejected_prediction_tokens"] == nil {
-				completionDetails["rejected_prediction_tokens"] = event.Usage.RejectedPredictionTokens
-			}
-
-			if len(completionDetails) > 0 {
-				usageMap["completion_tokens_details"] = completionDetails
-			}
-
-			chunk["usage"] = usageMap
+		if ev.Usage != nil {
+			ch["usage"] = buildUsageMap(ev.Usage, meta)
 		}
-		// Add grounding metadata in final streaming chunk
-		if event.GroundingMetadata != nil {
-			chunk["grounding_metadata"] = buildOpenAIGroundingMetadata(event.GroundingMetadata)
+		if ev.GroundingMetadata != nil {
+			ch["grounding_metadata"] = buildOpenAIGroundingMetadata(ev.GroundingMetadata)
 		}
 	case ir.EventTypeError:
-		return nil, fmt.Errorf("stream error: %v", event.Error)
-	default:
-		return nil, nil
+		return nil, fmt.Errorf("stream error: %v", ev.Error)
 	}
-
-	// Add logprobs to non-finish events if present
-	if event.Logprobs != nil && event.Type != ir.EventTypeFinish {
-		choice["logprobs"] = event.Logprobs
+	if ev.Logprobs != nil && ev.Type != ir.EventTypeFinish {
+		c["logprobs"] = ev.Logprobs
 	}
-
-	chunk["choices"] = []any{choice}
-	jsonBytes, err := json.Marshal(chunk)
-	if err != nil {
-		return nil, err
-	}
-	return ir.BuildSSEChunk(jsonBytes), nil
+	ch["choices"] = []any{c}
+	jb, _ := json.Marshal(ch)
+	return ir.BuildSSEChunk(jb), nil
 }
 
 func convertMessageToOpenAI(msg ir.Message) map[string]any {
-	var result map[string]any
+	var res map[string]any
 	switch msg.Role {
 	case ir.RoleSystem:
-		if text := ir.CombineTextParts(msg); text != "" {
-			result = map[string]any{"role": "system", "content": text}
+		if t := ir.CombineTextParts(msg); t != "" {
+			res = map[string]any{"role": "system", "content": t}
 		}
 	case ir.RoleUser:
-		result = buildOpenAIUserMessage(msg)
+		res = buildOpenAIUserMessage(msg)
 	case ir.RoleAssistant:
-		result = buildOpenAIAssistantMessage(msg)
+		res = buildOpenAIAssistantMessage(msg)
 	case ir.RoleTool:
-		result = buildOpenAIToolMessage(msg)
+		res = buildOpenAIToolMessage(msg)
 	}
-
-	// Add cache_control if present
-	if result != nil && msg.CacheControl != nil {
-		cacheCtrl := map[string]any{"type": msg.CacheControl.Type}
+	if res != nil && msg.CacheControl != nil {
+		cc := map[string]any{"type": msg.CacheControl.Type}
 		if msg.CacheControl.TTL != nil {
-			cacheCtrl["ttl"] = *msg.CacheControl.TTL
+			cc["ttl"] = *msg.CacheControl.TTL
 		}
-		result["cache_control"] = cacheCtrl
+		res["cache_control"] = cc
 	}
-
-	return result
+	return res
 }
 
 func buildOpenAIUserMessage(msg ir.Message) map[string]any {
-	// Pre-allocate with capacity
-	parts := make([]any, 0, len(msg.Content))
+	ps := make([]any, 0, len(msg.Content))
 	for i := range msg.Content {
-		part := &msg.Content[i]
-		switch part.Type {
+		p := &msg.Content[i]
+		switch p.Type {
 		case ir.ContentTypeText:
-			if part.Text != "" {
-				parts = append(parts, map[string]any{"type": "text", "text": part.Text})
+			if p.Text != "" {
+				ps = append(ps, map[string]any{"type": "text", "text": p.Text})
 			}
 		case ir.ContentTypeImage:
-			if part.Image != nil {
-				parts = append(parts, map[string]any{
-					"type":      "image_url",
-					"image_url": map[string]string{"url": fmt.Sprintf("data:%s;base64,%s", part.Image.MimeType, part.Image.Data)},
-				})
+			if p.Image != nil {
+				ps = append(ps, map[string]any{"type": "image_url", "image_url": map[string]string{"url": fmt.Sprintf("data:%s;base64,%s", p.Image.MimeType, p.Image.Data)}})
 			}
 		case ir.ContentTypeAudio:
-			// OpenAI audio input for gpt-4o-audio-preview models
-			if part.Audio != nil && part.Audio.Data != "" {
-				inputAudio := map[string]any{
-					"data": part.Audio.Data,
+			if p.Audio != nil && p.Audio.Data != "" {
+				ia := map[string]any{"data": p.Audio.Data}
+				if p.Audio.Format != "" {
+					ia["format"] = p.Audio.Format
 				}
-				if part.Audio.Format != "" {
-					inputAudio["format"] = part.Audio.Format
-				}
-				parts = append(parts, map[string]any{
-					"type":        "input_audio",
-					"input_audio": inputAudio,
-				})
+				ps = append(ps, map[string]any{"type": "input_audio", "input_audio": ia})
 			}
 		}
 	}
-	if len(parts) == 0 {
+	if len(ps) == 0 {
 		return nil
 	}
-	if len(parts) == 1 {
-		if tp, ok := parts[0].(map[string]any); ok && tp["type"] == "text" {
+	if len(ps) == 1 {
+		if tp, ok := ps[0].(map[string]any); ok && tp["type"] == "text" {
 			return map[string]any{"role": "user", "content": tp["text"]}
 		}
 	}
-	return map[string]any{"role": "user", "content": parts}
+	return map[string]any{"role": "user", "content": ps}
 }
 
 func buildOpenAIAssistantMessage(msg ir.Message) map[string]any {
-	result := map[string]any{"role": "assistant"}
-	text, reasoning := ir.CombineTextAndReasoning(msg)
-	if text != "" {
-		result["content"] = text
+	res := map[string]any{"role": "assistant"}
+	t, r := ir.CombineTextAndReasoning(msg)
+	if t != "" {
+		res["content"] = t
 	}
-	if reasoning != "" {
-		ir.AddReasoningToMessage(result, reasoning, ir.GetFirstReasoningSignature(msg))
+	if r != "" {
+		ir.AddReasoningToMessage(res, r, ir.GetFirstReasoningSignature(msg))
 	}
 	if len(msg.ToolCalls) > 0 {
 		tcs := make([]any, len(msg.ToolCalls))
 		for i := range msg.ToolCalls {
 			tc := &msg.ToolCalls[i]
-			tcMap := map[string]any{
-				"id": tc.ID, "type": "function",
-				"function": map[string]any{"name": tc.Name, "arguments": tc.Args},
-			}
-			// Inject thought_signature for Gemini 3 compatibility
+			tm := map[string]any{"id": tc.ID, "type": "function", "function": map[string]any{"name": tc.Name, "arguments": tc.Args}}
 			if len(tc.ThoughtSignature) > 0 {
-				tcMap["extra_content"] = map[string]any{
-					"google": map[string]any{
-						"thought_signature": string(tc.ThoughtSignature),
-					},
-				}
+				tm["extra_content"] = map[string]any{"google": map[string]any{"thought_signature": string(tc.ThoughtSignature)}}
 			}
-			tcs[i] = tcMap
+			tcs[i] = tm
 		}
-		result["tool_calls"] = tcs
+		res["tool_calls"] = tcs
 	}
-	// Include refusal message if model declined to respond
 	if msg.Refusal != "" {
-		result["refusal"] = msg.Refusal
+		res["refusal"] = msg.Refusal
 	}
-	return result
+	return res
 }
 
 func buildOpenAIToolMessage(msg ir.Message) map[string]any {
-	for _, part := range msg.Content {
-		if part.Type == ir.ContentTypeToolResult && part.ToolResult != nil {
-			// OpenAI Chat Completions API: tool messages don't have is_error field
-			// Error information should be embedded in content by the caller
-			return map[string]any{
-				"role": "tool", "tool_call_id": part.ToolResult.ToolCallID, "content": part.ToolResult.Result,
-			}
+	for _, p := range msg.Content {
+		if p.Type == ir.ContentTypeToolResult && p.ToolResult != nil {
+			return map[string]any{"role": "tool", "tool_call_id": p.ToolResult.ToolCallID, "content": p.ToolResult.Result}
 		}
 	}
 	return nil
 }
 
-// ToResponsesAPIResponse converts messages to Responses API non-streaming response.
-func ToResponsesAPIResponse(messages []ir.Message, usage *ir.Usage, model string, meta *ir.OpenAIMeta) ([]byte, error) {
-	responseID, created := fmt.Sprintf("resp_%d", time.Now().UnixNano()), time.Now().Unix()
+func ToResponsesAPIResponse(ms []ir.Message, us *ir.Usage, model string, meta *ir.OpenAIMeta) ([]byte, error) {
+	rid, cr := fmt.Sprintf("resp_%d", time.Now().UnixNano()), time.Now().Unix()
 	if meta != nil {
 		if meta.ResponseID != "" {
-			responseID = meta.ResponseID
+			rid = meta.ResponseID
 		}
 		if meta.CreateTime > 0 {
-			created = meta.CreateTime
+			cr = meta.CreateTime
 		}
 	}
-
-	response := map[string]any{
-		"id": responseID, "object": "response", "created_at": created, "status": "completed", "model": model,
-	}
-
-	var output []any
-	var outputText string
-	builder := ir.NewResponseBuilder(messages, usage, model, false)
-
-	for _, msg := range messages {
-		if msg.Role != ir.RoleAssistant {
+	res := map[string]any{"id": rid, "object": "response", "created_at": cr, "status": "completed", "model": model}
+	var out []any
+	var ot string
+	b := ir.NewResponseBuilder(ms, us, model, false)
+	for _, m := range ms {
+		if m.Role != ir.RoleAssistant {
 			continue
 		}
-		text, reasoning := ir.CombineTextAndReasoning(msg)
-		if reasoning != "" {
-			output = append(output, map[string]any{
-				"id": fmt.Sprintf("rs_%s", responseID), "type": "reasoning",
-				"summary": []any{map[string]any{"type": "summary_text", "text": reasoning}},
-			})
+		t, r := ir.CombineTextAndReasoning(m)
+		if r != "" {
+			out = append(out, map[string]any{"id": fmt.Sprintf("rs_%s", rid), "type": "reasoning", "summary": []any{map[string]any{"type": "summary_text", "text": r}}})
 		}
-		if text != "" {
-			outputText = text
-			output = append(output, map[string]any{
-				"id": fmt.Sprintf("msg_%s", responseID), "type": "message", "status": "completed", "role": "assistant",
-				"content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}},
-			})
+		if t != "" {
+			ot = t
+			out = append(out, map[string]any{"id": fmt.Sprintf("msg_%s", rid), "type": "message", "status": "completed", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": t, "annotations": []any{}}}})
 		}
-		for _, tc := range msg.ToolCalls {
-			output = append(output, map[string]any{
-				"id": fmt.Sprintf("fc_%s", tc.ID), "type": "function_call", "status": "completed",
-				"call_id": tc.ID, "name": tc.Name, "arguments": tc.Args,
-			})
+		for _, tc := range m.ToolCalls {
+			out = append(out, map[string]any{"id": fmt.Sprintf("fc_%s", tc.ID), "type": "function_call", "status": "completed", "call_id": tc.ID, "name": tc.Name, "arguments": tc.Args})
 		}
 	}
-
-	if len(output) > 0 {
-		response["output"] = output
+	if len(out) > 0 {
+		res["output"] = out
 	}
-	if outputText != "" {
-		response["output_text"] = outputText
+	if ot != "" {
+		res["output_text"] = ot
 	}
-
-	if usageMap := builder.BuildUsageMap(); usageMap != nil {
-		responsesUsage := map[string]any{
-			"input_tokens": usageMap["prompt_tokens"], "output_tokens": usageMap["completion_tokens"], "total_tokens": usageMap["total_tokens"],
+	if usMap := b.BuildUsageMap(); usMap != nil {
+		rum := map[string]any{"input_tokens": usMap["prompt_tokens"], "output_tokens": usMap["completion_tokens"], "total_tokens": usMap["total_tokens"]}
+		var ct int64
+		if us != nil && us.PromptTokensDetails != nil && us.PromptTokensDetails.CachedTokens > 0 {
+			ct = us.PromptTokensDetails.CachedTokens
+		} else if us != nil && us.CachedTokens > 0 {
+			ct = us.CachedTokens
 		}
-		// Check PromptTokensDetails first, then fall back to flat CachedTokens
-		var cachedTokens int64
-		if usage != nil && usage.PromptTokensDetails != nil && usage.PromptTokensDetails.CachedTokens > 0 {
-			cachedTokens = usage.PromptTokensDetails.CachedTokens
-		} else if usage != nil && usage.CachedTokens > 0 {
-			cachedTokens = usage.CachedTokens
+		if ct > 0 {
+			rum["input_tokens_details"] = map[string]any{"cached_tokens": ct}
 		}
-		if cachedTokens > 0 {
-			responsesUsage["input_tokens_details"] = map[string]any{"cached_tokens": cachedTokens}
-		}
-		// Build output_tokens_details with all available fields
-		outputDetails := map[string]any{}
-		var thoughtsTokens int64
-		if usage != nil && usage.CompletionTokensDetails != nil && usage.CompletionTokensDetails.ReasoningTokens > 0 {
-			thoughtsTokens = usage.CompletionTokensDetails.ReasoningTokens
+		od := map[string]any{}
+		var tt int64
+		if us != nil && us.CompletionTokensDetails != nil && us.CompletionTokensDetails.ReasoningTokens > 0 {
+			tt = us.CompletionTokensDetails.ReasoningTokens
 		} else if meta != nil && meta.ThoughtsTokenCount > 0 {
-			thoughtsTokens = int64(meta.ThoughtsTokenCount)
-		} else if usage != nil && usage.ThoughtsTokenCount > 0 {
-			thoughtsTokens = int64(usage.ThoughtsTokenCount)
+			tt = int64(meta.ThoughtsTokenCount)
+		} else if us != nil && us.ThoughtsTokenCount > 0 {
+			tt = int64(us.ThoughtsTokenCount)
 		}
-		if thoughtsTokens > 0 {
-			outputDetails["reasoning_tokens"] = thoughtsTokens
+		if tt > 0 {
+			od["reasoning_tokens"] = tt
 		}
-		if usage != nil && usage.CompletionTokensDetails != nil {
-			if usage.CompletionTokensDetails.AudioTokens > 0 {
-				outputDetails["audio_tokens"] = usage.CompletionTokensDetails.AudioTokens
-			}
+		if us != nil && us.CompletionTokensDetails != nil && us.CompletionTokensDetails.AudioTokens > 0 {
+			od["audio_tokens"] = us.CompletionTokensDetails.AudioTokens
 		}
-		if len(outputDetails) > 0 {
-			responsesUsage["output_tokens_details"] = outputDetails
+		if len(od) > 0 {
+			rum["output_tokens_details"] = od
 		}
-		response["usage"] = responsesUsage
+		res["usage"] = rum
 	}
-
-	// Add grounding metadata if present
 	if meta != nil && meta.GroundingMetadata != nil {
-		response["grounding_metadata"] = buildOpenAIGroundingMetadata(meta.GroundingMetadata)
+		res["grounding_metadata"] = buildOpenAIGroundingMetadata(meta.GroundingMetadata)
 	}
-
-	return json.Marshal(response)
+	return json.Marshal(res)
 }
 
-// ResponsesStreamState holds state for Responses API streaming conversion.
-// Responses API streaming uses semantic events (response.output_text.delta, etc.)
-// and requires tracking state across multiple events to build proper "done" events.
 type ResponsesStreamState struct {
-	Seq             int                      // Sequence number for events (required by Responses API)
-	ResponseID      string                   // Response ID (generated once, reused for all events)
-	Created         int64                    // Creation timestamp
-	Started         bool                     // Whether initial events (response.created, response.in_progress) were sent
-	ReasoningID     string                   // ID for reasoning output item (if any)
-	MsgID           string                   // ID for message output item (if any)
-	TextBuffer      strings.Builder          // Accumulated text content (needed for "done" event)
-	ReasoningBuffer strings.Builder          // Accumulated reasoning content
-	FuncCallIDs     map[int]string           // Tool call IDs by index
-	FuncNames       map[int]string           // Tool call names by index
-	FuncArgsBuffer  map[int]*strings.Builder // Accumulated tool call arguments by index
+	Seq             int
+	ResponseID      string
+	Created         int64
+	Started         bool
+	ReasoningID     string
+	MsgID           string
+	TextBuffer      strings.Builder
+	ReasoningBuffer strings.Builder
+	FuncCallIDs     map[int]string
+	FuncNames       map[int]string
+	FuncArgsBuffer  map[int]*strings.Builder
 }
 
-// NewResponsesStreamState creates a new streaming state for Responses API.
 func NewResponsesStreamState() *ResponsesStreamState {
-	return &ResponsesStreamState{
-		FuncCallIDs:    make(map[int]string),
-		FuncNames:      make(map[int]string),
-		FuncArgsBuffer: make(map[int]*strings.Builder),
-	}
+	return &ResponsesStreamState{FuncCallIDs: make(map[int]string), FuncNames: make(map[int]string), FuncArgsBuffer: make(map[int]*strings.Builder)}
 }
 
-// formatResponsesSSE formats an SSE event efficiently for Responses API.
-func formatResponsesSSE(eventType string, jsonData []byte) string {
-	// Pre-calculate size: "event: " + type + "\ndata: " + json + "\n\n"
-	size := 7 + len(eventType) + 7 + len(jsonData) + 2
+func formatResponsesSSE(et string, jb []byte) string {
 	var b strings.Builder
-	b.Grow(size)
+	b.Grow(16 + len(et) + len(jb))
 	b.WriteString("event: ")
-	b.WriteString(eventType)
+	b.WriteString(et)
 	b.WriteString("\ndata: ")
-	b.Write(jsonData)
+	b.Write(jb)
 	b.WriteString("\n\n")
 	return b.String()
 }
 
-// ToResponsesAPIChunk converts event to Responses API SSE streaming chunks.
-// Returns multiple SSE strings because Responses API requires semantic events
-// (e.g., first token requires output_item.added + content_part.added + delta events).
-func ToResponsesAPIChunk(event ir.UnifiedEvent, model string, state *ResponsesStreamState) ([]string, error) {
-	if state.ResponseID == "" {
-		state.ResponseID = fmt.Sprintf("resp_%d", time.Now().UnixNano())
-		state.Created = time.Now().Unix()
+func ToResponsesAPIChunk(ev ir.UnifiedEvent, model string, s *ResponsesStreamState) ([]string, error) {
+	if s.ResponseID == "" {
+		s.ResponseID, s.Created = fmt.Sprintf("resp_%d", time.Now().UnixNano()), time.Now().Unix()
 	}
-
-	nextSeq := func() int { state.Seq++; return state.Seq }
-	// Pre-allocate: most common case is 1 event, max is ~5 for first token or finish
+	ns := func() int { s.Seq++; return s.Seq }
 	out := make([]string, 0, 4)
-
-	if !state.Started {
+	if !s.Started {
 		for _, t := range []string{"response.created", "response.in_progress"} {
-			b, _ := json.Marshal(map[string]any{
-				"type": t, "sequence_number": nextSeq(),
-				"response": map[string]any{
-					"id": state.ResponseID, "object": "response", "created_at": state.Created, "status": "in_progress",
-				},
-			})
+			b, _ := json.Marshal(map[string]any{"type": t, "sequence_number": ns(), "response": map[string]any{"id": s.ResponseID, "object": "response", "created_at": s.Created, "status": "in_progress"}})
 			out = append(out, formatResponsesSSE(t, b))
 		}
-		state.Started = true
+		s.Started = true
 	}
-
-	switch event.Type {
+	switch ev.Type {
 	case ir.EventTypeToken:
-		if state.MsgID == "" {
-			state.MsgID = fmt.Sprintf("msg_%s", state.ResponseID)
-			b1, _ := json.Marshal(map[string]any{
-				"type": "response.output_item.added", "sequence_number": nextSeq(), "output_index": 0,
-				"item": map[string]any{"id": state.MsgID, "type": "message", "status": "in_progress", "role": "assistant", "content": []any{}},
-			})
+		if s.MsgID == "" {
+			s.MsgID = fmt.Sprintf("msg_%s", s.ResponseID)
+			b1, _ := json.Marshal(map[string]any{"type": "response.output_item.added", "sequence_number": ns(), "output_index": 0, "item": map[string]any{"id": s.MsgID, "type": "message", "status": "in_progress", "role": "assistant", "content": []any{}}})
 			out = append(out, formatResponsesSSE("response.output_item.added", b1))
-			b2, _ := json.Marshal(map[string]any{
-				"type": "response.content_part.added", "sequence_number": nextSeq(), "item_id": state.MsgID,
-				"output_index": 0, "content_index": 0, "part": map[string]any{"type": "output_text", "text": ""},
-			})
+			b2, _ := json.Marshal(map[string]any{"type": "response.content_part.added", "sequence_number": ns(), "item_id": s.MsgID, "output_index": 0, "content_index": 0, "part": map[string]any{"type": "output_text", "text": ""}})
 			out = append(out, formatResponsesSSE("response.content_part.added", b2))
 		}
-		state.TextBuffer.WriteString(event.Content)
-		b, _ := json.Marshal(map[string]any{
-			"type": "response.output_text.delta", "sequence_number": nextSeq(), "item_id": state.MsgID,
-			"output_index": 0, "content_index": 0, "delta": event.Content,
-		})
+		s.TextBuffer.WriteString(ev.Content)
+		b, _ := json.Marshal(map[string]any{"type": "response.output_text.delta", "sequence_number": ns(), "item_id": s.MsgID, "output_index": 0, "content_index": 0, "delta": ev.Content})
 		out = append(out, formatResponsesSSE("response.output_text.delta", b))
-
 	case ir.EventTypeReasoning, ir.EventTypeReasoningSummary:
-		text := event.Reasoning
-		if event.Type == ir.EventTypeReasoningSummary {
-			text = event.ReasoningSummary
+		t := ev.Reasoning
+		if ev.Type == ir.EventTypeReasoningSummary {
+			t = ev.ReasoningSummary
 		}
-		if state.ReasoningID == "" {
-			state.ReasoningID = fmt.Sprintf("rs_%s", state.ResponseID)
-			b, _ := json.Marshal(map[string]any{
-				"type": "response.output_item.added", "sequence_number": nextSeq(), "output_index": 0,
-				"item": map[string]any{"id": state.ReasoningID, "type": "reasoning", "status": "in_progress", "summary": []any{}},
-			})
+		if s.ReasoningID == "" {
+			s.ReasoningID = fmt.Sprintf("rs_%s", s.ResponseID)
+			b, _ := json.Marshal(map[string]any{"type": "response.output_item.added", "sequence_number": ns(), "output_index": 0, "item": map[string]any{"id": s.ReasoningID, "type": "reasoning", "status": "in_progress", "summary": []any{}}})
 			out = append(out, formatResponsesSSE("response.output_item.added", b))
 		}
-		state.ReasoningBuffer.WriteString(text)
-		b, _ := json.Marshal(map[string]any{
-			"type": "response.reasoning_summary_text.delta", "sequence_number": nextSeq(), "item_id": state.ReasoningID,
-			"output_index": 0, "content_index": 0, "delta": text,
-		})
+		s.ReasoningBuffer.WriteString(t)
+		b, _ := json.Marshal(map[string]any{"type": "response.reasoning_summary_text.delta", "sequence_number": ns(), "item_id": s.ReasoningID, "output_index": 0, "content_index": 0, "delta": t})
 		out = append(out, formatResponsesSSE("response.reasoning_summary_text.delta", b))
-
 	case ir.EventTypeToolCall:
-		idx := event.ToolCallIndex
-		if _, exists := state.FuncCallIDs[idx]; !exists {
-			state.FuncCallIDs[idx] = fmt.Sprintf("fc_%s", event.ToolCall.ID)
-			state.FuncNames[idx] = event.ToolCall.Name
-			b, _ := json.Marshal(map[string]any{
-				"type": "response.output_item.added", "sequence_number": nextSeq(), "output_index": idx,
-				"item": map[string]any{
-					"id": state.FuncCallIDs[idx], "type": "function_call", "status": "in_progress",
-					"call_id": event.ToolCall.ID, "name": event.ToolCall.Name, "arguments": "",
-				},
-			})
+		idx := ev.ToolCallIndex
+		if _, ok := s.FuncCallIDs[idx]; !ok {
+			s.FuncCallIDs[idx], s.FuncNames[idx] = fmt.Sprintf("fc_%s", ev.ToolCall.ID), ev.ToolCall.Name
+			b, _ := json.Marshal(map[string]any{"type": "response.output_item.added", "sequence_number": ns(), "output_index": idx, "item": map[string]any{"id": s.FuncCallIDs[idx], "type": "function_call", "status": "in_progress", "call_id": ev.ToolCall.ID, "name": ev.ToolCall.Name, "arguments": ""}})
 			out = append(out, formatResponsesSSE("response.output_item.added", b))
 		}
-		// For complete tool call, we might not get deltas, so we can just emit done if needed,
-		// but usually we get deltas or the full args. If we get full args here:
-		if event.ToolCall.Args != "" {
-			b, _ := json.Marshal(map[string]any{
-				"type": "response.function_call_arguments.delta", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
-				"output_index": idx, "delta": event.ToolCall.Args,
-			})
+		if ev.ToolCall.Args != "" {
+			b, _ := json.Marshal(map[string]any{"type": "response.function_call_arguments.delta", "sequence_number": ns(), "item_id": s.FuncCallIDs[idx], "output_index": idx, "delta": ev.ToolCall.Args})
 			out = append(out, formatResponsesSSE("response.function_call_arguments.delta", b))
 		}
-		b, _ := json.Marshal(map[string]any{
-			"type": "response.output_item.done", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
-			"output_index": idx, "item": map[string]any{
-				"id": state.FuncCallIDs[idx], "type": "function_call", "status": "completed",
-				"call_id": event.ToolCall.ID, "name": event.ToolCall.Name, "arguments": event.ToolCall.Args,
-			},
-		})
+		b, _ := json.Marshal(map[string]any{"type": "response.output_item.done", "sequence_number": ns(), "item_id": s.FuncCallIDs[idx], "output_index": idx, "item": map[string]any{"id": s.FuncCallIDs[idx], "type": "function_call", "status": "completed", "call_id": ev.ToolCall.ID, "name": ev.ToolCall.Name, "arguments": ev.ToolCall.Args}})
 		out = append(out, formatResponsesSSE("response.output_item.done", b))
-
 	case ir.EventTypeToolCallDelta:
-		idx := event.ToolCallIndex
-		if _, exists := state.FuncCallIDs[idx]; !exists {
-			state.FuncCallIDs[idx] = fmt.Sprintf("fc_%s", event.ToolCall.ID)
-			b, _ := json.Marshal(map[string]any{
-				"type": "response.output_item.added", "sequence_number": nextSeq(), "output_index": idx,
-				"item": map[string]any{
-					"id": state.FuncCallIDs[idx], "type": "function_call", "status": "in_progress",
-					"call_id": event.ToolCall.ID, "name": "", "arguments": "",
-				},
-			})
+		idx := ev.ToolCallIndex
+		if _, ok := s.FuncCallIDs[idx]; !ok {
+			s.FuncCallIDs[idx] = fmt.Sprintf("fc_%s", ev.ToolCall.ID)
+			b, _ := json.Marshal(map[string]any{"type": "response.output_item.added", "sequence_number": ns(), "output_index": idx, "item": map[string]any{"id": s.FuncCallIDs[idx], "type": "function_call", "status": "in_progress", "call_id": ev.ToolCall.ID, "name": "", "arguments": ""}})
 			out = append(out, formatResponsesSSE("response.output_item.added", b))
 		}
-		if state.FuncArgsBuffer[idx] == nil {
-			state.FuncArgsBuffer[idx] = &strings.Builder{}
+		if s.FuncArgsBuffer[idx] == nil {
+			s.FuncArgsBuffer[idx] = &strings.Builder{}
 		}
-		state.FuncArgsBuffer[idx].WriteString(event.ToolCall.Args)
-		b, _ := json.Marshal(map[string]any{
-			"type": "response.function_call_arguments.delta", "sequence_number": nextSeq(), "item_id": state.FuncCallIDs[idx],
-			"output_index": idx, "delta": event.ToolCall.Args,
-		})
+		s.FuncArgsBuffer[idx].WriteString(ev.ToolCall.Args)
+		b, _ := json.Marshal(map[string]any{"type": "response.function_call_arguments.delta", "sequence_number": ns(), "item_id": s.FuncCallIDs[idx], "output_index": idx, "delta": ev.ToolCall.Args})
 		out = append(out, formatResponsesSSE("response.function_call_arguments.delta", b))
-
 	case ir.EventTypeFinish:
-		textContent := state.TextBuffer.String()
-		reasoningContent := state.ReasoningBuffer.String()
-		if state.MsgID != "" {
-			b1, _ := json.Marshal(map[string]any{
-				"type": "response.content_part.done", "sequence_number": nextSeq(), "item_id": state.MsgID,
-				"output_index": 0, "content_index": 0, "part": map[string]any{"type": "output_text", "text": textContent},
-			})
+		t, r := s.TextBuffer.String(), s.ReasoningBuffer.String()
+		if s.MsgID != "" {
+			b1, _ := json.Marshal(map[string]any{"type": "response.content_part.done", "sequence_number": ns(), "item_id": s.MsgID, "output_index": 0, "content_index": 0, "part": map[string]any{"type": "output_text", "text": t}})
 			out = append(out, formatResponsesSSE("response.content_part.done", b1))
-			b2, _ := json.Marshal(map[string]any{
-				"type": "response.output_item.done", "sequence_number": nextSeq(), "output_index": 0,
-				"item": map[string]any{
-					"id": state.MsgID, "type": "message", "status": "completed", "role": "assistant",
-					"content": []any{map[string]any{"type": "output_text", "text": textContent}},
-				},
-			})
+			b2, _ := json.Marshal(map[string]any{"type": "response.output_item.done", "sequence_number": ns(), "output_index": 0, "item": map[string]any{"id": s.MsgID, "type": "message", "status": "completed", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": t}}}})
 			out = append(out, formatResponsesSSE("response.output_item.done", b2))
 		}
-		if state.ReasoningID != "" {
-			b, _ := json.Marshal(map[string]any{
-				"type": "response.output_item.done", "sequence_number": nextSeq(), "output_index": 0,
-				"item": map[string]any{
-					"id": state.ReasoningID, "type": "reasoning", "status": "completed",
-					"summary": []any{map[string]any{"type": "summary_text", "text": reasoningContent}},
-				},
-			})
+		if s.ReasoningID != "" {
+			b, _ := json.Marshal(map[string]any{"type": "response.output_item.done", "sequence_number": ns(), "output_index": 0, "item": map[string]any{"id": s.ReasoningID, "type": "reasoning", "status": "completed", "summary": []any{map[string]any{"type": "summary_text", "text": r}}}})
 			out = append(out, formatResponsesSSE("response.output_item.done", b))
 		}
-
-		usageMap := map[string]any{}
-		if event.Usage != nil {
-			usageMap = map[string]any{
-				"input_tokens": event.Usage.PromptTokens, "output_tokens": event.Usage.CompletionTokens, "total_tokens": event.Usage.TotalTokens,
+		um := map[string]any{}
+		if ev.Usage != nil {
+			um = map[string]any{"input_tokens": ev.Usage.PromptTokens, "output_tokens": ev.Usage.CompletionTokens, "total_tokens": ev.Usage.TotalTokens}
+			var ct int64
+			if ev.Usage.PromptTokensDetails != nil && ev.Usage.PromptTokensDetails.CachedTokens > 0 {
+				ct = ev.Usage.PromptTokensDetails.CachedTokens
+			} else if ev.Usage.CachedTokens > 0 {
+				ct = ev.Usage.CachedTokens
 			}
-			// Check PromptTokensDetails first, then fall back to flat CachedTokens
-			var cachedTokens int64
-			if event.Usage.PromptTokensDetails != nil && event.Usage.PromptTokensDetails.CachedTokens > 0 {
-				cachedTokens = event.Usage.PromptTokensDetails.CachedTokens
-			} else if event.Usage.CachedTokens > 0 {
-				cachedTokens = event.Usage.CachedTokens
+			if ct > 0 {
+				um["input_tokens_details"] = map[string]any{"cached_tokens": ct}
 			}
-			if cachedTokens > 0 {
-				usageMap["input_tokens_details"] = map[string]any{"cached_tokens": cachedTokens}
+			var rt int64
+			if ev.Usage.CompletionTokensDetails != nil && ev.Usage.CompletionTokensDetails.ReasoningTokens > 0 {
+				rt = ev.Usage.CompletionTokensDetails.ReasoningTokens
+			} else if ev.Usage.ThoughtsTokenCount > 0 {
+				rt = int64(ev.Usage.ThoughtsTokenCount)
 			}
-			// Check CompletionTokensDetails first, then fall back to ThoughtsTokenCount
-			var reasoningTokens int64
-			if event.Usage.CompletionTokensDetails != nil && event.Usage.CompletionTokensDetails.ReasoningTokens > 0 {
-				reasoningTokens = event.Usage.CompletionTokensDetails.ReasoningTokens
-			} else if event.Usage.ThoughtsTokenCount > 0 {
-				reasoningTokens = int64(event.Usage.ThoughtsTokenCount)
-			}
-			if reasoningTokens > 0 {
-				usageMap["output_tokens_details"] = map[string]any{"reasoning_tokens": reasoningTokens}
+			if rt > 0 {
+				um["output_tokens_details"] = map[string]any{"reasoning_tokens": rt}
 			}
 		}
-
-		b, _ := json.Marshal(map[string]any{
-			"type": "response.done", "sequence_number": nextSeq(),
-			"response": map[string]any{
-				"id": state.ResponseID, "object": "response", "created_at": state.Created, "status": "completed",
-				"usage": usageMap,
-			},
-		})
+		b, _ := json.Marshal(map[string]any{"type": "response.done", "sequence_number": ns(), "response": map[string]any{"id": s.ResponseID, "object": "response", "created_at": s.Created, "status": "completed", "usage": um}})
 		out = append(out, formatResponsesSSE("response.done", b))
 	}
-
 	return out, nil
 }
 
-// buildOpenAIGroundingMetadata converts GroundingMetadata to OpenAI-compatible format.
-// This is an extension for Google Search grounding results in OpenAI format responses.
 func buildOpenAIGroundingMetadata(gm *ir.GroundingMetadata) map[string]any {
 	if gm == nil {
 		return nil
 	}
-
-	result := map[string]any{}
-
+	res := map[string]any{}
 	if len(gm.WebSearchQueries) > 0 {
-		result["web_search_queries"] = gm.WebSearchQueries
+		res["web_search_queries"] = gm.WebSearchQueries
 	}
-
 	if gm.SearchEntryPoint != nil && gm.SearchEntryPoint.RenderedContent != "" {
-		result["search_entry_point"] = map[string]any{
-			"rendered_content": gm.SearchEntryPoint.RenderedContent,
-		}
+		res["search_entry_point"] = map[string]any{"rendered_content": gm.SearchEntryPoint.RenderedContent}
 	}
-
 	if len(gm.GroundingChunks) > 0 {
-		var sources []map[string]any
-		for _, chunk := range gm.GroundingChunks {
-			if chunk.Web != nil {
-				source := map[string]any{
-					"type":  "web",
-					"uri":   chunk.Web.URI,
-					"title": chunk.Web.Title,
+		var s []map[string]any
+		for _, c := range gm.GroundingChunks {
+			if c.Web != nil {
+				sm := map[string]any{"type": "web", "uri": c.Web.URI, "title": c.Web.Title}
+				if c.Web.Domain != "" {
+					sm["domain"] = c.Web.Domain
 				}
-				if chunk.Web.Domain != "" {
-					source["domain"] = chunk.Web.Domain
-				}
-				sources = append(sources, source)
+				s = append(s, sm)
 			}
 		}
-		if len(sources) > 0 {
-			result["sources"] = sources
+		if len(s) > 0 {
+			res["sources"] = s
 		}
 	}
-
 	if len(gm.GroundingSupports) > 0 {
-		var citations []map[string]any
-		for _, s := range gm.GroundingSupports {
-			citation := map[string]any{}
-			if s.Segment != nil {
-				citation["text"] = s.Segment.Text
-				if s.Segment.StartIndex > 0 {
-					citation["start_index"] = s.Segment.StartIndex
+		var cs []map[string]any
+		for _, sup := range gm.GroundingSupports {
+			ci := map[string]any{}
+			if sup.Segment != nil {
+				ci["text"] = sup.Segment.Text
+				if sup.Segment.StartIndex > 0 {
+					ci["start_index"] = sup.Segment.StartIndex
 				}
-				if s.Segment.EndIndex > 0 {
-					citation["end_index"] = s.Segment.EndIndex
+				if sup.Segment.EndIndex > 0 {
+					ci["end_index"] = sup.Segment.EndIndex
 				}
 			}
-			if len(s.GroundingChunkIndices) > 0 {
-				citation["source_indices"] = s.GroundingChunkIndices
+			if len(sup.GroundingChunkIndices) > 0 {
+				ci["source_indices"] = sup.GroundingChunkIndices
 			}
-			citations = append(citations, citation)
+			cs = append(cs, ci)
 		}
-		if len(citations) > 0 {
-			result["citations"] = citations
+		if len(cs) > 0 {
+			res["citations"] = cs
 		}
 	}
-
-	return result
+	return res
 }
 
-// findAudioContent finds the first audio content part in a message.
-func findAudioContent(msg *ir.Message) *ir.AudioPart {
-	if msg == nil {
-		return nil
-	}
-	for _, part := range msg.Content {
-		if part.Type == ir.ContentTypeAudio && part.Audio != nil {
-			return part.Audio
+func findAudioContent(m ir.Message) *ir.AudioPart {
+	for _, p := range m.Content {
+		if p.Type == ir.ContentTypeAudio && p.Audio != nil {
+			return p.Audio
 		}
 	}
 	return nil

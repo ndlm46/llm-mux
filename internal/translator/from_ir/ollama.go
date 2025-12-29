@@ -11,504 +11,301 @@ import (
 	"github.com/nghyane/llm-mux/internal/translator/to_ir"
 )
 
-// ToOllamaRequest converts unified request to Ollama API JSON format.
-// Use when sending request TO Ollama API (e.g., client sent OpenAI format, proxy to Ollama).
-// Returns /api/chat format by default. Use metadata["ollama_endpoint"] = "generate" for /api/generate.
+// ToOllamaRequest converts unified request to Ollama API format.
 func ToOllamaRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
-	// Check if generate endpoint is requested
 	if req.Metadata != nil {
-		if endpoint, ok := req.Metadata["ollama_endpoint"].(string); ok && endpoint == "generate" {
+		if ep, ok := req.Metadata["ollama_endpoint"].(string); ok && ep == "generate" {
 			return convertToOllamaGenerateRequest(req)
 		}
 	}
 	return convertToOllamaChatRequest(req)
 }
 
-// convertToOllamaChatRequest converts to Ollama /api/chat request format.
 func convertToOllamaChatRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
-	m := map[string]any{
-		"model":    req.Model,
-		"messages": []any{},
-		"stream":   req.Metadata["stream"] == true, // Preserve stream flag if present
-	}
-
-	// Generation options
-	m["options"] = buildOllamaOptions(req)
-
-	// Messages
-	var messages []any
+	m := map[string]any{"model": req.Model, "messages": []any{}, "stream": req.Metadata["stream"] == true, "options": buildOllamaOptions(req)}
 	for _, msg := range req.Messages {
-		if msgObj := convertMessageToOllama(msg); msgObj != nil {
-			messages = append(messages, msgObj)
+		if mo := convertMessageToOllama(msg); mo != nil {
+			m["messages"] = append(m["messages"].([]any), mo)
 		}
 	}
-	m["messages"] = messages
-
-	// Tools (Ollama uses OpenAI format)
 	if len(req.Tools) > 0 {
-		tools := make([]any, len(req.Tools))
-		for i, t := range req.Tools {
-			params := t.Parameters
-			if params == nil {
-				params = map[string]any{"type": "object", "properties": map[string]any{}}
+		var tools []any
+		for _, t := range req.Tools {
+			ps := t.Parameters
+			if ps == nil {
+				ps = map[string]any{"type": "object", "properties": map[string]any{}}
 			}
-			tools[i] = map[string]any{
-				"type": "function",
-				"function": map[string]any{
-					"name":        t.Name,
-					"description": t.Description,
-					"parameters":  params,
-				},
-			}
+			tools = append(tools, map[string]any{"type": "function", "function": map[string]any{"name": t.Name, "description": t.Description, "parameters": ps}})
 		}
 		m["tools"] = tools
 	}
-
-	// Format (JSON mode or Schema)
 	if req.ResponseSchema != nil {
 		m["format"] = req.ResponseSchema
-	} else if req.Metadata != nil {
-		if format, ok := req.Metadata["ollama_format"].(string); ok && format != "" {
-			m["format"] = format
-		}
+	} else if fmt, ok := req.Metadata["ollama_format"].(string); ok && fmt != "" {
+		m["format"] = fmt
 	}
-
-	if req.Metadata != nil {
-		if keepAlive, ok := req.Metadata["ollama_keep_alive"].(string); ok && keepAlive != "" {
-			m["keep_alive"] = keepAlive
-		}
+	if ka, ok := req.Metadata["ollama_keep_alive"].(string); ok && ka != "" {
+		m["keep_alive"] = ka
 	}
-
 	return json.Marshal(m)
 }
 
-// convertToOllamaGenerateRequest converts to Ollama /api/generate request format.
 func convertToOllamaGenerateRequest(req *ir.UnifiedChatRequest) ([]byte, error) {
-	m := map[string]any{
-		"model":  req.Model,
-		"prompt": "",
-		"stream": req.Metadata["stream"] == true,
-	}
-
-	// Generation options
-	m["options"] = buildOllamaOptions(req)
-
-	// Extract system prompt and user prompt from messages
-	var systemPrompt, userPrompt string
-	var images []string
-
+	m := map[string]any{"model": req.Model, "prompt": "", "stream": req.Metadata["stream"] == true, "options": buildOllamaOptions(req)}
+	var sp, up string
+	var imgs []string
 	for _, msg := range req.Messages {
 		switch msg.Role {
 		case ir.RoleSystem:
-			systemPrompt = ir.CombineTextParts(msg)
+			sp = ir.CombineTextParts(msg)
 		case ir.RoleUser:
-			userPrompt = ir.CombineTextParts(msg)
-			// Extract images
-			for _, part := range msg.Content {
-				if part.Type == ir.ContentTypeImage && part.Image != nil {
-					images = append(images, part.Image.Data)
+			up = ir.CombineTextParts(msg)
+			for _, p := range msg.Content {
+				if p.Type == ir.ContentTypeImage && p.Image != nil {
+					imgs = append(imgs, p.Image.Data)
 				}
 			}
 		}
 	}
-
-	if systemPrompt != "" {
-		m["system"] = systemPrompt
+	if sp != "" {
+		m["system"] = sp
 	}
-	if userPrompt != "" {
-		m["prompt"] = userPrompt
+	if up != "" {
+		m["prompt"] = up
 	}
-	if len(images) > 0 {
-		m["images"] = images
+	if len(imgs) > 0 {
+		m["images"] = imgs
 	}
-
-	// Format (JSON mode or Schema)
 	if req.ResponseSchema != nil {
 		m["format"] = req.ResponseSchema
-	} else if req.Metadata != nil {
-		if format, ok := req.Metadata["ollama_format"].(string); ok && format != "" {
-			m["format"] = format
-		}
+	} else if fmt, ok := req.Metadata["ollama_format"].(string); ok && fmt != "" {
+		m["format"] = fmt
 	}
-
-	if req.Metadata != nil {
-		if keepAlive, ok := req.Metadata["ollama_keep_alive"].(string); ok && keepAlive != "" {
-			m["keep_alive"] = keepAlive
-		}
+	if ka, ok := req.Metadata["ollama_keep_alive"].(string); ok && ka != "" {
+		m["keep_alive"] = ka
 	}
-
 	return json.Marshal(m)
 }
 
-// buildOllamaOptions builds generation options map.
 func buildOllamaOptions(req *ir.UnifiedChatRequest) map[string]any {
-	opts := make(map[string]any)
+	o := make(map[string]any)
 	if req.Temperature != nil {
-		opts["temperature"] = *req.Temperature
+		o["temperature"] = *req.Temperature
 	}
 	if req.TopP != nil {
-		opts["top_p"] = *req.TopP
+		o["top_p"] = *req.TopP
 	}
 	if req.TopK != nil {
-		opts["top_k"] = *req.TopK
+		o["top_k"] = *req.TopK
 	}
 	if req.MaxTokens != nil {
-		opts["num_predict"] = *req.MaxTokens
+		o["num_predict"] = *req.MaxTokens
 	}
 	if len(req.StopSequences) > 0 {
-		opts["stop"] = req.StopSequences
+		o["stop"] = req.StopSequences
 	}
-
-	// Ollama-specific options from metadata
 	if req.Metadata != nil {
-		if seed, ok := req.Metadata["ollama_seed"].(int64); ok {
-			opts["seed"] = seed
+		if v, ok := req.Metadata["ollama_seed"].(int64); ok {
+			o["seed"] = v
 		}
-		if numCtx, ok := req.Metadata["ollama_num_ctx"].(int64); ok {
-			opts["num_ctx"] = numCtx
+		if v, ok := req.Metadata["ollama_num_ctx"].(int64); ok {
+			o["num_ctx"] = v
 		}
 	}
-	return opts
+	return o
 }
 
-// convertMessageToOllama converts single message to Ollama format.
-func convertMessageToOllama(msg ir.Message) map[string]any {
-	switch msg.Role {
+func convertMessageToOllama(m ir.Message) map[string]any {
+	switch m.Role {
 	case ir.RoleSystem:
-		if text := ir.CombineTextParts(msg); text != "" {
-			return map[string]any{"role": "system", "content": text}
+		if t := ir.CombineTextParts(m); t != "" {
+			return map[string]any{"role": "system", "content": t}
 		}
 	case ir.RoleUser:
-		return buildOllamaUserMessage(msg)
+		return buildOllamaUserMessage(m)
 	case ir.RoleAssistant:
-		return buildOllamaAssistantMessage(msg)
+		return buildOllamaAssistantMessage(m)
 	case ir.RoleTool:
-		return buildOllamaToolMessage(msg)
+		return buildOllamaToolMessage(m)
 	}
 	return nil
 }
 
-// buildOllamaUserMessage builds user message with text and images.
-func buildOllamaUserMessage(msg ir.Message) map[string]any {
-	result := map[string]any{"role": "user"}
-	var text string
-	var images []string
-
-	for _, part := range msg.Content {
-		switch part.Type {
+func buildOllamaUserMessage(m ir.Message) map[string]any {
+	var t string
+	var imgs []string
+	for _, p := range m.Content {
+		switch p.Type {
 		case ir.ContentTypeText:
-			text += part.Text
+			t += p.Text
 		case ir.ContentTypeImage:
-			if part.Image != nil {
-				// Ollama expects raw base64 without data URI prefix
-				images = append(images, part.Image.Data)
+			if p.Image != nil {
+				imgs = append(imgs, p.Image.Data)
 			}
 		}
 	}
-
-	if text != "" {
-		result["content"] = text
+	res := map[string]any{"role": "user"}
+	if t != "" {
+		res["content"] = t
 	}
-	if len(images) > 0 {
-		result["images"] = images
+	if len(imgs) > 0 {
+		res["images"] = imgs
 	}
-	if text == "" && len(images) == 0 {
+	if t == "" && len(imgs) == 0 {
 		return nil
 	}
-	return result
+	return res
 }
 
-func buildOllamaAssistantMessage(msg ir.Message) map[string]any {
-	result := map[string]any{"role": "assistant"}
-	text, reasoning := ir.CombineTextAndReasoning(msg)
-	if text != "" {
-		result["content"] = text
+func buildOllamaAssistantMessage(m ir.Message) map[string]any {
+	res := map[string]any{"role": "assistant"}
+	t, r := ir.CombineTextAndReasoning(m)
+	if t != "" {
+		res["content"] = t
 	}
-	if reasoning != "" {
-		result["thinking"] = reasoning
+	if r != "" {
+		res["thinking"] = r
 	}
-	// Tool calls (Ollama uses OpenAI format)
-	if len(msg.ToolCalls) > 0 {
-		tcs := make([]any, len(msg.ToolCalls))
-		for i, tc := range msg.ToolCalls {
-			tcs[i] = map[string]any{
-				"id":   tc.ID,
-				"type": "function",
-				"function": map[string]any{
-					"name":      tc.Name,
-					"arguments": tc.Args,
-				},
-			}
+	if len(m.ToolCalls) > 0 {
+		tcs := make([]any, len(m.ToolCalls))
+		for i, tc := range m.ToolCalls {
+			tcs[i] = map[string]any{"id": tc.ID, "type": "function", "function": map[string]any{"name": tc.Name, "arguments": tc.Args}}
 		}
-		result["tool_calls"] = tcs
+		res["tool_calls"] = tcs
 	}
-	return result
+	return res
 }
 
-// buildOllamaToolMessage builds tool result message.
-func buildOllamaToolMessage(msg ir.Message) map[string]any {
-	for _, part := range msg.Content {
-		if part.Type == ir.ContentTypeToolResult && part.ToolResult != nil {
-			return map[string]any{
-				"role":         "tool",
-				"tool_call_id": part.ToolResult.ToolCallID,
-				"content":      part.ToolResult.Result,
-			}
+func buildOllamaToolMessage(m ir.Message) map[string]any {
+	for _, p := range m.Content {
+		if p.Type == ir.ContentTypeToolResult && p.ToolResult != nil {
+			return map[string]any{"role": "tool", "tool_call_id": p.ToolResult.ToolCallID, "content": p.ToolResult.Result}
 		}
 	}
 	return nil
 }
 
-// ToOllamaChatResponse converts messages to Ollama /api/chat response.
-// Use when sending response TO client in Ollama chat format (non-streaming).
-func ToOllamaChatResponse(messages []ir.Message, usage *ir.Usage, model string) ([]byte, error) {
-	builder := ir.NewResponseBuilder(messages, usage, model, false)
-
-	response := map[string]any{
-		"model":      model,
-		"created_at": time.Now().UTC().Format(time.RFC3339),
-		"done":       true,
-		"message": map[string]any{
-			"role":    "assistant",
-			"content": "",
-		},
-	}
-
-	if msg := builder.GetLastMessage(); msg != nil {
-		msgMap := response["message"].(map[string]any)
-		msgMap["role"] = string(msg.Role)
-
-		if text := builder.GetTextContent(); text != "" {
-			msgMap["content"] = text
+func ToOllamaChatResponse(ms []ir.Message, us *ir.Usage, model string) ([]byte, error) {
+	b := ir.NewResponseBuilder(ms, us, model, false)
+	res := map[string]any{"model": model, "created_at": time.Now().UTC().Format(time.RFC3339), "done": true, "message": map[string]any{"role": "assistant", "content": ""}}
+	if m := b.GetLastMessage(); m != nil {
+		mc := res["message"].(map[string]any)
+		mc["role"] = string(m.Role)
+		if t := b.GetTextContent(); t != "" {
+			mc["content"] = t
 		}
-
-		// Add thinking/reasoning content (for models like DeepSeek R1)
-		if reasoning := builder.GetReasoningContent(); reasoning != "" {
-			msgMap["thinking"] = reasoning
+		if r := b.GetReasoningContent(); r != "" {
+			mc["thinking"] = r
 		}
-
-		if tcs := builder.BuildOpenAIToolCalls(); tcs != nil {
-			msgMap["tool_calls"] = tcs
-			response["done_reason"] = "tool_calls"
+		if tcs := b.BuildOpenAIToolCalls(); tcs != nil {
+			mc["tool_calls"], res["done_reason"] = tcs, "tool_calls"
 		} else {
-			response["done_reason"] = "stop"
+			res["done_reason"] = "stop"
 		}
 	}
-
-	// Usage statistics
-	if usage != nil {
-		response["prompt_eval_count"] = usage.PromptTokens
-		response["eval_count"] = usage.CompletionTokens
-		// Zero out durations as we don't track them
-		response["total_duration"] = 0
-		response["load_duration"] = 0
-		response["prompt_eval_duration"] = 0
-		response["eval_duration"] = 0
+	if us != nil {
+		res["prompt_eval_count"], res["eval_count"] = us.PromptTokens, us.CompletionTokens
+		res["total_duration"], res["load_duration"], res["prompt_eval_duration"], res["eval_duration"] = 0, 0, 0, 0
 	}
-
-	return json.Marshal(response)
+	return json.Marshal(res)
 }
 
-// ToOllamaGenerateResponse converts messages to Ollama /api/generate response.
-// Use when sending response TO client in Ollama generate format (non-streaming).
-func ToOllamaGenerateResponse(messages []ir.Message, usage *ir.Usage, model string) ([]byte, error) {
-	builder := ir.NewResponseBuilder(messages, usage, model, false)
-
-	response := map[string]any{
-		"model":       model,
-		"created_at":  time.Now().UTC().Format(time.RFC3339),
-		"done":        true,
-		"response":    "",
-		"done_reason": "stop",
+func ToOllamaGenerateResponse(ms []ir.Message, us *ir.Usage, model string) ([]byte, error) {
+	b := ir.NewResponseBuilder(ms, us, model, false)
+	res := map[string]any{"model": model, "created_at": time.Now().UTC().Format(time.RFC3339), "done": true, "response": "", "done_reason": "stop"}
+	if t := b.GetTextContent(); t != "" {
+		res["response"] = t
 	}
-
-	if text := builder.GetTextContent(); text != "" {
-		response["response"] = text
+	if r := b.GetReasoningContent(); r != "" {
+		res["thinking"] = r
 	}
-
-	// Add thinking/reasoning content (for models like DeepSeek R1)
-	if reasoning := builder.GetReasoningContent(); reasoning != "" {
-		response["thinking"] = reasoning
+	if us != nil {
+		res["prompt_eval_count"], res["eval_count"] = us.PromptTokens, us.CompletionTokens
+		res["total_duration"], res["load_duration"], res["prompt_eval_duration"], res["eval_duration"] = 0, 0, 0, 0
 	}
-
-	// Usage statistics
-	if usage != nil {
-		response["prompt_eval_count"] = usage.PromptTokens
-		response["eval_count"] = usage.CompletionTokens
-		response["total_duration"] = 0
-		response["load_duration"] = 0
-		response["prompt_eval_duration"] = 0
-		response["eval_duration"] = 0
-	}
-
-	return json.Marshal(response)
+	return json.Marshal(res)
 }
 
-// ToOllamaChatChunk converts event to Ollama /api/chat streaming chunk.
-func ToOllamaChatChunk(event ir.UnifiedEvent, model string) ([]byte, error) {
-	chunk := map[string]any{
-		"model":      model,
-		"created_at": time.Now().UTC().Format(time.RFC3339),
-		"done":       false,
-		"message": map[string]any{
-			"role":    "assistant",
-			"content": "",
-		},
-	}
-
-	switch event.Type {
+func ToOllamaChatChunk(ev ir.UnifiedEvent, model string) ([]byte, error) {
+	res := map[string]any{"model": model, "created_at": time.Now().UTC().Format(time.RFC3339), "done": false, "message": map[string]any{"role": "assistant", "content": ""}}
+	switch ev.Type {
 	case ir.EventTypeToken:
-		chunk["message"].(map[string]any)["content"] = event.Content
-
+		res["message"].(map[string]any)["content"] = ev.Content
 	case ir.EventTypeReasoning:
-		// Ollama native API uses "thinking" field for reasoning/chain-of-thought
-		chunk["message"].(map[string]any)["thinking"] = event.Reasoning
-
+		res["message"].(map[string]any)["thinking"] = ev.Reasoning
 	case ir.EventTypeToolCall:
-		if event.ToolCall != nil {
-			chunk["message"].(map[string]any)["tool_calls"] = []any{
-				map[string]any{
-					"id":   event.ToolCall.ID,
-					"type": "function",
-					"function": map[string]any{
-						"name":      event.ToolCall.Name,
-						"arguments": event.ToolCall.Args,
-					},
-				},
-			}
+		if ev.ToolCall != nil {
+			res["message"].(map[string]any)["tool_calls"] = []any{map[string]any{"id": ev.ToolCall.ID, "type": "function", "function": map[string]any{"name": ev.ToolCall.Name, "arguments": ev.ToolCall.Args}}}
 		}
-
 	case ir.EventTypeFinish:
-		chunk["done"] = true
-		chunk["done_reason"] = mapFinishReasonToOllama(event.FinishReason)
-		chunk["message"].(map[string]any)["content"] = ""
-
-		if event.Usage != nil {
-			chunk["prompt_eval_count"] = event.Usage.PromptTokens
-			chunk["eval_count"] = event.Usage.CompletionTokens
-			chunk["total_duration"] = 0
-			chunk["load_duration"] = 0
-			chunk["prompt_eval_duration"] = 0
-			chunk["eval_duration"] = 0
+		res["done"], res["done_reason"] = true, mapFinishReasonToOllama(ev.FinishReason)
+		if ev.Usage != nil {
+			res["prompt_eval_count"], res["eval_count"] = ev.Usage.PromptTokens, ev.Usage.CompletionTokens
+			res["total_duration"], res["load_duration"], res["prompt_eval_duration"], res["eval_duration"] = 0, 0, 0, 0
 		}
-
 	case ir.EventTypeError:
-		return nil, fmt.Errorf("stream error: %v", event.Error)
-
-	default:
-		// Unknown event types are silently skipped (graceful handling)
-		return nil, nil
+		return nil, fmt.Errorf("stream error: %v", ev.Error)
 	}
-
-	jsonBytes, err := json.Marshal(chunk)
-	if err != nil {
-		return nil, err
-	}
-
-	// Ollama uses newline-delimited JSON (not SSE)
-	return append(jsonBytes, '\n'), nil
+	jb, _ := json.Marshal(res)
+	return append(jb, '\n'), nil
 }
 
-// ToOllamaGenerateChunk converts event to Ollama /api/generate streaming chunk.
-func ToOllamaGenerateChunk(event ir.UnifiedEvent, model string) ([]byte, error) {
-	chunk := map[string]any{
-		"model":      model,
-		"created_at": time.Now().UTC().Format(time.RFC3339),
-		"done":       false,
-		"response":   "",
-	}
-
-	switch event.Type {
+func ToOllamaGenerateChunk(ev ir.UnifiedEvent, model string) ([]byte, error) {
+	res := map[string]any{"model": model, "created_at": time.Now().UTC().Format(time.RFC3339), "done": false, "response": ""}
+	switch ev.Type {
 	case ir.EventTypeToken:
-		chunk["response"] = event.Content
-
+		res["response"] = ev.Content
 	case ir.EventTypeReasoning:
-		// Ollama native API uses "thinking" field for reasoning/chain-of-thought
-		chunk["thinking"] = event.Reasoning
-
+		res["thinking"] = ev.Reasoning
 	case ir.EventTypeFinish:
-		chunk["done"] = true
-		chunk["done_reason"] = mapFinishReasonToOllama(event.FinishReason)
-		chunk["response"] = ""
-
-		if event.Usage != nil {
-			chunk["prompt_eval_count"] = event.Usage.PromptTokens
-			chunk["eval_count"] = event.Usage.CompletionTokens
-			chunk["total_duration"] = 0
-			chunk["load_duration"] = 0
-			chunk["prompt_eval_duration"] = 0
-			chunk["eval_duration"] = 0
+		res["done"], res["done_reason"] = true, mapFinishReasonToOllama(ev.FinishReason)
+		if ev.Usage != nil {
+			res["prompt_eval_count"], res["eval_count"] = ev.Usage.PromptTokens, ev.Usage.CompletionTokens
+			res["total_duration"], res["load_duration"], res["prompt_eval_duration"], res["eval_duration"] = 0, 0, 0, 0
 		}
-
-	case ir.EventTypeToolCall:
-		// Generate endpoint doesn't support tool calls, skip silently
-		return nil, nil
-
 	case ir.EventTypeError:
-		return nil, fmt.Errorf("stream error: %v", event.Error)
-
-	default:
-		return nil, nil
+		return nil, fmt.Errorf("stream error: %v", ev.Error)
 	}
+	jb, _ := json.Marshal(res)
+	return append(jb, '\n'), nil
+}
 
-	jsonBytes, err := json.Marshal(chunk)
+func OpenAIToOllamaChat(rj []byte, m string) ([]byte, error) {
+	ms, us, err := to_ir.ParseOpenAIResponse(rj)
 	if err != nil {
 		return nil, err
 	}
-
-	return append(jsonBytes, '\n'), nil
+	return ToOllamaChatResponse(ms, us, m)
 }
 
-// OpenAIToOllamaChat converts OpenAI response to Ollama chat format.
-// This is a convenience function that parses OpenAI response, then converts to Ollama.
-func OpenAIToOllamaChat(rawJSON []byte, model string) ([]byte, error) {
-	messages, usage, err := to_ir.ParseOpenAIResponse(rawJSON)
+func OpenAIToOllamaGenerate(rj []byte, m string) ([]byte, error) {
+	ms, us, err := to_ir.ParseOpenAIResponse(rj)
 	if err != nil {
 		return nil, err
 	}
-	return ToOllamaChatResponse(messages, usage, model)
+	return ToOllamaGenerateResponse(ms, us, m)
 }
 
-// OpenAIToOllamaGenerate converts OpenAI response to Ollama generate format.
-func OpenAIToOllamaGenerate(rawJSON []byte, model string) ([]byte, error) {
-	messages, usage, err := to_ir.ParseOpenAIResponse(rawJSON)
-	if err != nil {
+func OpenAIChunkToOllamaChat(rj []byte, m string) ([]byte, error) {
+	evs, err := to_ir.ParseOpenAIChunk(rj)
+	if err != nil || len(evs) == 0 {
 		return nil, err
 	}
-	return ToOllamaGenerateResponse(messages, usage, model)
+	return ToOllamaChatChunk(evs[0], m)
 }
 
-// OpenAIChunkToOllamaChat converts OpenAI streaming chunk to Ollama chat chunk.
-func OpenAIChunkToOllamaChat(rawJSON []byte, model string) ([]byte, error) {
-	events, err := to_ir.ParseOpenAIChunk(rawJSON)
-	if err != nil {
+func OpenAIChunkToOllamaGenerate(rj []byte, m string) ([]byte, error) {
+	evs, err := to_ir.ParseOpenAIChunk(rj)
+	if err != nil || len(evs) == 0 {
 		return nil, err
 	}
-	if len(events) == 0 {
-		return nil, nil
-	}
-	// Convert first event (OpenAI chunks typically have one event)
-	return ToOllamaChatChunk(events[0], model)
+	return ToOllamaGenerateChunk(evs[0], m)
 }
 
-// OpenAIChunkToOllamaGenerate converts OpenAI streaming chunk to Ollama generate chunk.
-func OpenAIChunkToOllamaGenerate(rawJSON []byte, model string) ([]byte, error) {
-	events, err := to_ir.ParseOpenAIChunk(rawJSON)
-	if err != nil {
-		return nil, err
-	}
-	if len(events) == 0 {
-		return nil, nil
-	}
-	return ToOllamaGenerateChunk(events[0], model)
-}
-
-func mapFinishReasonToOllama(reason ir.FinishReason) string {
-	switch reason {
-	case ir.FinishReasonStop, ir.FinishReasonStopSequence:
-		return "stop"
+func mapFinishReasonToOllama(r ir.FinishReason) string {
+	switch r {
 	case ir.FinishReasonMaxTokens:
-		return "length" // IR "max_tokens" = Ollama "length"
+		return "length"
 	case ir.FinishReasonToolCalls:
 		return "tool_calls"
 	default:
@@ -516,87 +313,41 @@ func mapFinishReasonToOllama(reason ir.FinishReason) string {
 	}
 }
 
-// ToOllamaShowResponse generates an Ollama show response for a given model name.
-// Looks up model info from registry, falls back to sensible defaults.
-func ToOllamaShowResponse(modelName string) []byte {
-	// Default values for unknown models
-	contextLength := 128000  // 128K context
-	maxOutputTokens := 16384 // 16K output
-	architecture := "transformer"
-
-	// Try to find model in registry (search across all providers)
-	if info := findModelInfoByName(modelName); info != nil {
+func ToOllamaShowResponse(mn string) []byte {
+	cl, mt, ar := 128000, 16384, "transformer"
+	if info := findModelInfoByName(mn); info != nil {
 		if info.Type != "" {
-			architecture = info.Type
+			ar = info.Type
 		}
 		if info.ContextLength > 0 {
-			contextLength = info.ContextLength
+			cl = info.ContextLength
 		} else if info.InputTokenLimit > 0 {
-			contextLength = info.InputTokenLimit
+			cl = info.InputTokenLimit
 		}
 		if info.MaxCompletionTokens > 0 {
-			maxOutputTokens = info.MaxCompletionTokens
+			mt = info.MaxCompletionTokens
 		} else if info.OutputTokenLimit > 0 {
-			maxOutputTokens = info.OutputTokenLimit
+			mt = info.OutputTokenLimit
 		}
 	}
-
-	result := map[string]any{
-		"license":    "",
-		"modelfile":  "# Modelfile for " + modelName + "\nFROM " + modelName,
-		"parameters": fmt.Sprintf("num_ctx %d\nnum_predict %d\ntemperature 0.7\ntop_p 0.9", contextLength, maxOutputTokens),
-		"template":   "{{ if .System }}{{ .System }}\n{{ end }}{{ .Prompt }}",
-		"details": map[string]any{
-			"parent_model":       "",
-			"format":             "gguf",
-			"family":             "Ollama",
-			"families":           []string{"Ollama"},
-			"parameter_size":     "0B",
-			"quantization_level": "Q4_K_M",
-		},
-		"model_info": map[string]any{
-			"general.architecture":           architecture,
-			"general.basename":               modelName,
-			"general.file_type":              2,
-			"general.parameter_count":        0,
-			"general.quantization_version":   2,
-			"general.context_length":         contextLength,
-			"llama.context_length":           contextLength,
-			"llama.rope.freq_base":           10000.0,
-			architecture + ".context_length": contextLength,
-		},
-		"capabilities": []string{"tools", "vision", "completion"},
-	}
-
-	jsonBytes, _ := json.Marshal(result)
-	return jsonBytes
+	res := map[string]any{"license": "", "modelfile": "# Modelfile for " + mn + "\nFROM " + mn, "parameters": fmt.Sprintf("num_ctx %d\nnum_predict %d\ntemperature 0.7\ntop_p 0.9", cl, mt), "template": "{{ if .System }}{{ .System }}\n{{ end }}{{ .Prompt }}", "details": map[string]any{"parent_model": "", "format": "gguf", "family": "Ollama", "families": []string{"Ollama"}, "parameter_size": "0B", "quantization_level": "Q4_K_M"}, "model_info": map[string]any{"general.architecture": ar, "general.basename": mn, "general.file_type": 2, "general.parameter_count": 0, "general.quantization_version": 2, "general.context_length": cl, "llama.context_length": cl, "llama.rope.freq_base": 10000.0, ar + ".context_length": cl}, "capabilities": []string{"tools", "vision", "completion"}}
+	jb, _ := json.Marshal(res)
+	return jb
 }
 
-// findModelInfoByName searches for model info in registry by model name.
-// It handles the provider:modelID format used internally by registry.
-func findModelInfoByName(modelName string) *registry.ModelInfo {
+func findModelInfoByName(mn string) *registry.ModelInfo {
 	reg := registry.GetGlobalRegistry()
-
-	// First try direct lookup
-	if info := reg.GetModelInfo(modelName); info != nil {
+	if info := reg.GetModelInfo(mn); info != nil {
 		return info
 	}
-
-	// Search through available models (handles provider:modelID format)
-	models := reg.GetAvailableModels("openai")
-	for _, m := range models {
-		id, ok := m["id"].(string)
-		if !ok {
-			continue
-		}
-		// Strip provider prefix if present (e.g., "[Gemini CLI] gemini-2.5-flash" -> "gemini-2.5-flash")
-		cleanID := id
+	for _, m := range reg.GetAvailableModels("openai") {
+		id, _ := m["id"].(string)
+		cid := id
 		if idx := strings.Index(id, "] "); idx != -1 {
-			cleanID = id[idx+2:]
+			cid = id[idx+2:]
 		}
-		if strings.EqualFold(cleanID, modelName) {
-			// Found match, build ModelInfo from map
-			info := &registry.ModelInfo{ID: cleanID}
+		if strings.EqualFold(cid, mn) {
+			info := &registry.ModelInfo{ID: cid}
 			if v, ok := m["type"].(string); ok {
 				info.Type = v
 			}
@@ -609,6 +360,5 @@ func findModelInfoByName(modelName string) *registry.ModelInfo {
 			return info
 		}
 	}
-
 	return nil
 }
